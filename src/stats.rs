@@ -17,7 +17,7 @@ pub struct Stats {
     pub unknown_error: AtomicI64,
 
     dup_sender: mpsc::Sender<String>,
-    writer_handle: Option<tokio::task::JoinHandle<()>>,
+    _writer_handle: tokio::task::JoinHandle<()>,
 }
 
 impl Stats {
@@ -39,7 +39,7 @@ impl Stats {
             no_route_to_host: AtomicI64::new(0),
             unknown_error: AtomicI64::new(0),
             dup_sender: tx,
-            writer_handle: Some(handle),
+            _writer_handle: handle,
         }
     }
 
@@ -101,32 +101,9 @@ impl Stats {
         tracing::info!("{msg}");
     }
 
-    /// Close the duplicates channel and wait for the writer to flush.
-    pub async fn close(&mut self) {
-        // Drop sender to signal writer to finish
-        drop(std::mem::replace(
-            &mut self.dup_sender,
-            mpsc::channel(1).0,
-        ));
-        if let Some(handle) = self.writer_handle.take() {
-            let _ = handle.await;
-        }
-    }
 }
 
-pub fn classify_error(errno: i32) -> &'static str {
-    match errno {
-        17 => "file_exists",    // EEXIST
-        101 => "network_unreachable", // ENETUNREACH
-        19 => "no_such_device", // ENODEV
-        1 => "operation_not_permitted", // EPERM
-        22 => "invalid_argument", // EINVAL
-        113 => "no_route_to_host", // EHOSTUNREACH
-        _ => "unknown",
-    }
-}
-
-/// Classify error from error message string (fallback when errno not available).
+/// Classify error from error message string.
 pub fn classify_error_str(err: &str) -> &'static str {
     let err_lower = err.to_lowercase();
     if err_lower.contains("file exists") {
