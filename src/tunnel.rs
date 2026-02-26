@@ -1,41 +1,30 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
-use std::os::unix::io::{AsRawFd, BorrowedFd, OwnedFd};
+use std::os::unix::io::{AsRawFd, OwnedFd};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
-use shadowsocks::relay::Address;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 use crate::icmp;
 use crate::proxy::SsProxy;
 
-/// Helper: borrow a raw fd as BorrowedFd (caller must ensure fd is valid).
-unsafe fn borrow_fd(fd: i32) -> BorrowedFd<'static> {
-    BorrowedFd::borrow_raw(fd)
-}
-
 const TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const UDP_SESSION_TIMEOUT: Duration = Duration::from_secs(120);
 const TCP_RELAY_BUF_SIZE: usize = 32 * 1024;
-const UDP_RECV_BUF_SIZE: usize = 65536;
 const METRICS_LOG_PERIOD: Duration = Duration::from_secs(30);
 
-// Global telemetry counters
 static ACTIVE_TCP_RELAYS: AtomicI64 = AtomicI64::new(0);
 static ACTIVE_UDP_RELAYS: AtomicI64 = AtomicI64::new(0);
 static TCP_RELAY_ERRORS: AtomicU64 = AtomicU64::new(0);
 static TCP_RELAY_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
 static UDP_RELAY_ERRORS: AtomicU64 = AtomicU64::new(0);
 static ICMP_REPLIES: AtomicU64 = AtomicU64::new(0);
-static TUN_PACKETS_DISPATCHED: AtomicU64 = AtomicU64::new(0);
-
-type ProxySocketArc = Arc<shadowsocks::relay::udprelay::proxy_socket::ProxySocket>;
 
 /// Tunnel connects a TUN device to a Shadowsocks proxy using netstack-smoltcp.
 pub struct Tunnel {
@@ -45,31 +34,35 @@ pub struct Tunnel {
 }
 
 impl Tunnel {
-    /// Create and start a new tunnel.
     pub fn new(tun_fd: OwnedFd, mtu: u16, proxy: SsProxy) -> Result<Self> {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let proxy = Arc::new(proxy);
-        let mut tasks = Vec::new();
+        let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
         // Build the netstack-smoltcp stack
         let (stack, runner, udp_socket, tcp_listener) =
             netstack_smoltcp::StackBuilder::default()
                 .stack_buffer_size(512)
-                .tcp_buffer_size(262144) // 256KB
+                .tcp_buffer_size(262144)
                 .enable_udp(true)
                 .enable_tcp(true)
                 .enable_icmp(true)
                 .build()
                 .context("build netstack-smoltcp stack")?;
 
+        // Runner returns Result — wrap it to match JoinHandle<()>
         if let Some(runner) = runner {
-            tasks.push(tokio::spawn(runner));
+            tasks.push(tokio::spawn(async move {
+                if let Err(e) = runner.await {
+                    tracing::error!("netstack runner error: {e}");
+                }
+            }));
         }
 
         let tcp_listener = tcp_listener.expect("TCP listener should exist when TCP enabled");
         let udp_socket = udp_socket.expect("UDP socket should exist when UDP enabled");
 
-        // Stack implements both Stream and Sink; split via futures
+        // Stack implements Stream + Sink; split via futures
         let (stack_sink, stack_stream) = stack.split();
         let stack_sink = Arc::new(Mutex::new(stack_sink));
 
@@ -84,14 +77,59 @@ impl Tunnel {
             let stack_sink = stack_sink.clone();
 
             tasks.push(tokio::spawn(async move {
-                tun_to_stack(
-                    tun_fd_read,
-                    tun_fd_icmp,
-                    stack_sink,
-                    shutdown_rx,
-                    mtu,
-                )
-                .await;
+                let fd = tun_fd_read.as_raw_fd();
+                let mut buf = vec![0u8; mtu as usize + 4];
+
+                loop {
+                    if *shutdown_rx.borrow() {
+                        return;
+                    }
+
+                    // Poll for data with 100ms timeout using libc directly
+                    let mut pfd = nix::libc::pollfd {
+                        fd,
+                        events: nix::libc::POLLIN,
+                        revents: 0,
+                    };
+                    let poll_ret = unsafe { nix::libc::poll(&mut pfd, 1, 100) };
+
+                    if poll_ret <= 0 {
+                        continue; // timeout or EINTR
+                    }
+
+                    let n = unsafe {
+                        nix::libc::read(fd, buf.as_mut_ptr() as *mut nix::libc::c_void, buf.len())
+                    };
+                    if n <= 0 {
+                        continue;
+                    }
+                    let n = n as usize;
+                    let pkt_data = &buf[..n];
+
+                    // Intercept ICMP echo requests and reply instantly
+                    if let Some(reply) = icmp::handle_icmp_echo(pkt_data) {
+                        let icmp_fd = tun_fd_icmp.as_raw_fd();
+                        unsafe {
+                            nix::libc::write(
+                                icmp_fd,
+                                reply.as_ptr() as *const nix::libc::c_void,
+                                reply.len(),
+                            );
+                        }
+                        ICMP_REPLIES.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+
+                    // Inject into the network stack
+                    let frame: netstack_smoltcp::AnyIpPktFrame = pkt_data.to_vec().into();
+                    let mut sink = stack_sink.lock().await;
+                    if let Err(e) = sink.send(frame).await {
+                        if *shutdown_rx.borrow() {
+                            return;
+                        }
+                        tracing::error!("Stack inject error: {e}");
+                    }
+                }
             }));
         }
 
@@ -102,17 +140,24 @@ impl Tunnel {
 
             tasks.push(tokio::spawn(async move {
                 let fd = tun_fd_write.as_raw_fd();
+
                 loop {
                     tokio::select! {
                         _ = shutdown_rx.changed() => return,
                         pkt = stack_stream.next() => {
                             match pkt {
-                                Some(frame) => {
+                                Some(Ok(frame)) => {
                                     let data: &[u8] = frame.as_ref();
-                                    let _ = nix::unistd::write(
-                                        unsafe { borrow_fd(fd) },
-                                        data,
-                                    );
+                                    unsafe {
+                                        nix::libc::write(
+                                            fd,
+                                            data.as_ptr() as *const nix::libc::c_void,
+                                            data.len(),
+                                        );
+                                    }
+                                }
+                                Some(Err(e)) => {
+                                    tracing::debug!("Stack stream error: {e}");
                                 }
                                 None => return,
                             }
@@ -149,16 +194,14 @@ impl Tunnel {
         }
 
         // ---- Task: UDP handler ----
-        // UdpSocket::split() returns types from a private module,
-        // so we handle everything inline here.
         {
             let proxy = proxy.clone();
             let mut shutdown_rx = shutdown_rx.clone();
             let (mut udp_read, udp_write) = udp_socket.split();
             let udp_write = Arc::new(Mutex::new(udp_write));
 
-            // Session map: (src, dst) → ProxySocket
-            let sessions: Arc<Mutex<HashMap<(SocketAddr, SocketAddr), ProxySocketArc>>> =
+            // Sessions map: (src, dst) → channel sender for outgoing packets
+            let sessions: Arc<Mutex<HashMap<(SocketAddr, SocketAddr), tokio::sync::mpsc::Sender<Vec<u8>>>>> =
                 Arc::new(Mutex::new(HashMap::new()));
 
             tasks.push(tokio::spawn(async move {
@@ -170,8 +213,8 @@ impl Tunnel {
                                 return;
                             };
 
-                            let dst = local_addr;
-                            let src = remote_addr;
+                            let dst = local_addr;  // original destination
+                            let src = remote_addr;  // source client
                             let key = (src, dst);
 
                             let proxy = proxy.clone();
@@ -179,15 +222,20 @@ impl Tunnel {
                             let udp_write = udp_write.clone();
 
                             tokio::spawn(async move {
-                                let needs_new = {
+                                // Check if session exists
+                                let existing_tx = {
                                     let map = sessions.lock().await;
-                                    !map.contains_key(&key)
+                                    map.get(&key).cloned()
                                 };
 
-                                if needs_new {
+                                if let Some(tx) = existing_tx {
+                                    // Send to existing session
+                                    let _ = tx.send(payload).await;
+                                } else {
+                                    // Create new session
                                     ACTIVE_UDP_RELAYS.fetch_add(1, Ordering::Relaxed);
 
-                                    let proxy_socket = match proxy.dial_udp().await {
+                                    let session = match proxy.new_udp_session(dst).await {
                                         Ok(s) => s,
                                         Err(e) => {
                                             tracing::warn!("[UDP] dial fail {src} -> {dst}: {e}");
@@ -199,38 +247,36 @@ impl Tunnel {
 
                                     tracing::debug!("[UDP] {src} <-> {dst}");
 
-                                    let proxy_socket: ProxySocketArc = Arc::new(proxy_socket);
+                                    let tx = session.outgoing.clone();
                                     {
                                         let mut map = sessions.lock().await;
-                                        map.insert(key, proxy_socket.clone());
+                                        map.insert(key, session.outgoing);
                                     }
+
+                                    // Send initial packet
+                                    let _ = tx.send(payload).await;
 
                                     // Spawn reverse relay: SS → local
                                     let sessions_cleanup = sessions.clone();
                                     let udp_write_clone = udp_write.clone();
-                                    let ps = proxy_socket.clone();
                                     tokio::spawn(async move {
-                                        let mut buf = vec![0u8; UDP_RECV_BUF_SIZE];
+                                        let mut incoming = session.incoming;
                                         loop {
                                             let recv = tokio::time::timeout(
                                                 UDP_SESSION_TIMEOUT,
-                                                ps.recv(&mut buf),
+                                                incoming.recv(),
                                             ).await;
 
                                             match recv {
-                                                Ok(Ok((n, _addr, _))) => {
-                                                    let msg = (buf[..n].to_vec(), src, dst);
+                                                Ok(Some(data)) => {
+                                                    let msg = (data, src, dst);
                                                     let mut writer = udp_write_clone.lock().await;
                                                     if let Err(e) = writer.send(msg).await {
                                                         tracing::debug!("[UDP] write back error: {e}");
                                                         break;
                                                     }
                                                 }
-                                                Ok(Err(e)) => {
-                                                    tracing::debug!("[UDP] recv error: {e}");
-                                                    UDP_RELAY_ERRORS.fetch_add(1, Ordering::Relaxed);
-                                                    break;
-                                                }
+                                                Ok(None) => break, // channel closed
                                                 Err(_) => {
                                                     tracing::debug!("[UDP] session timeout {src} <-> {dst}");
                                                     break;
@@ -242,21 +288,6 @@ impl Tunnel {
                                         map.remove(&key);
                                         ACTIVE_UDP_RELAYS.fetch_sub(1, Ordering::Relaxed);
                                     });
-
-                                    // Send the initial packet
-                                    let target = Address::SocketAddress(dst);
-                                    if let Err(e) = proxy_socket.send(&target, &payload).await {
-                                        tracing::debug!("[UDP] send error {src} -> {dst}: {e}");
-                                    }
-                                } else {
-                                    // Existing session
-                                    let map = sessions.lock().await;
-                                    if let Some(ps) = map.get(&key) {
-                                        let target = Address::SocketAddress(dst);
-                                        if let Err(e) = ps.send(&target, &payload).await {
-                                            tracing::debug!("[UDP] send error {src} -> {dst}: {e}");
-                                        }
-                                    }
                                 }
                             });
                         }
@@ -295,89 +326,12 @@ impl Tunnel {
         })
     }
 
-    /// Shut down the tunnel.
     pub async fn close(self) {
         let _ = self.shutdown.send(true);
         for task in self.tasks {
             task.abort();
             let _ = task.await;
         }
-    }
-}
-
-/// TUN → Stack reader with ICMP interception.
-async fn tun_to_stack(
-    tun_fd_read: Arc<OwnedFd>,
-    tun_fd_icmp: Arc<OwnedFd>,
-    stack_sink: Arc<Mutex<futures::stream::SplitSink<netstack_smoltcp::Stack, netstack_smoltcp::AnyIpPktFrame>>>,
-    shutdown_rx: tokio::sync::watch::Receiver<bool>,
-    mtu: u16,
-) {
-    let fd = tun_fd_read.as_raw_fd();
-    let mut buf = vec![0u8; mtu as usize + 4];
-
-    loop {
-        if *shutdown_rx.borrow() {
-            return;
-        }
-
-        // Poll for data with 100ms timeout
-        let mut poll_fds = [nix::poll::PollFd::new(
-            unsafe { borrow_fd(fd) },
-            nix::poll::PollFlags::POLLIN,
-        )];
-
-        let poll_result = nix::poll::poll(&mut poll_fds, nix::poll::PollTimeout::from(100u16));
-
-        match poll_result {
-            Ok(0) => continue,
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(e) => {
-                if *shutdown_rx.borrow() {
-                    return;
-                }
-                tracing::error!("TUN poll error: {e}");
-                continue;
-            }
-            Ok(_) => {}
-        }
-
-        let n = match nix::unistd::read(unsafe { borrow_fd(fd) }, &mut buf) {
-            Ok(n) if n == 0 => continue,
-            Ok(n) => n,
-            Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EWOULDBLOCK) => continue,
-            Err(e) => {
-                if *shutdown_rx.borrow() {
-                    return;
-                }
-                tracing::error!("TUN read error: {e}");
-                continue;
-            }
-        };
-
-        let pkt_data = &buf[..n];
-
-        // Intercept ICMP echo requests and reply instantly
-        if let Some(reply) = icmp::handle_icmp_echo(pkt_data) {
-            let icmp_fd = tun_fd_icmp.as_raw_fd();
-            let _ = nix::unistd::write(
-                unsafe { borrow_fd(icmp_fd) },
-                &reply,
-            );
-            ICMP_REPLIES.fetch_add(1, Ordering::Relaxed);
-            continue;
-        }
-
-        // Inject into the network stack
-        let frame: netstack_smoltcp::AnyIpPktFrame = pkt_data.to_vec().into();
-        let mut sink = stack_sink.lock().await;
-        if let Err(e) = sink.send(frame).await {
-            if *shutdown_rx.borrow() {
-                return;
-            }
-            tracing::error!("Stack inject error: {e}");
-        }
-        TUN_PACKETS_DISPATCHED.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -389,16 +343,16 @@ async fn handle_tcp(
     proxy: Arc<SsProxy>,
 ) {
     ACTIVE_TCP_RELAYS.fetch_add(1, Ordering::Relaxed);
-    struct TcpRelayGuard;
-    impl Drop for TcpRelayGuard {
+    struct Guard;
+    impl Drop for Guard {
         fn drop(&mut self) {
             ACTIVE_TCP_RELAYS.fetch_sub(1, Ordering::Relaxed);
         }
     }
-    let _guard = TcpRelayGuard;
+    let _guard = Guard;
 
     let start = Instant::now();
-    let target = local_addr; // original destination
+    let target = local_addr;
 
     tracing::debug!("[TCP] {remote_addr} <-> {target}");
 
@@ -413,14 +367,12 @@ async fn handle_tcp(
 
     if let Err(e) = relay_tcp(tcp_stream, remote_stream).await {
         let elapsed = start.elapsed();
-        if is_timeout(&e) {
+        if e.kind() == io::ErrorKind::TimedOut {
             TCP_RELAY_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
             tracing::debug!("[TCP] {remote_addr} <-> {target}: timeout after {elapsed:?}");
         } else {
             TCP_RELAY_ERRORS.fetch_add(1, Ordering::Relaxed);
-            tracing::debug!(
-                "[TCP] {remote_addr} <-> {target}: error after {elapsed:?}: {e}"
-            );
+            tracing::debug!("[TCP] {remote_addr} <-> {target}: error after {elapsed:?}: {e}");
         }
     }
 }
@@ -462,16 +414,10 @@ where
             Ok(Ok(0)) => return Ok(total),
             Ok(Ok(n)) => n,
             Ok(Err(e)) => return Err(e),
-            Err(_) => {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "idle timeout"));
-            }
+            Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "idle timeout")),
         };
 
         writer.write_all(&buf[..n]).await?;
         total += n as u64;
     }
-}
-
-fn is_timeout(e: &io::Error) -> bool {
-    e.kind() == io::ErrorKind::TimedOut
 }

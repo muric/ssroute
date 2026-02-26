@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use tokio::process::Command;
 
 /// A running SIP003-compatible plugin process.
