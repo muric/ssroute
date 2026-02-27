@@ -1,5 +1,5 @@
 use std::fs::OpenOptions;
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 
 use anyhow::{bail, Context, Result};
 
