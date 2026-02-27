@@ -233,8 +233,10 @@ impl Tunnel {
                                 let cleanup = sessions.clone();
                                 let uw = udp_write.clone();
                                 tokio::spawn(async move {
+                                    let t0 = Instant::now();
                                     match proxy.new_udp_session(dst).await {
                                         Ok(session) => {
+                                            tracing::info!("[UDP] dial OK {src}<->{dst} {:?}", t0.elapsed());
                                             let ss_tx = session.outgoing;
                                             let mut fwd_rx = fwd_rx;
                                             tokio::spawn(async move {
@@ -311,28 +313,31 @@ async fn handle_tcp(
 
     let src = local_addr;
     let target = remote_addr;
-    let start = Instant::now();
+    let t0 = Instant::now();
+
+    tracing::info!("[TCP] accept {src} -> {target}");
 
     let remote = match proxy.dial_tcp(target).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!("[TCP] dial {src}->{target}: {e}");
+            tracing::warn!("[TCP] dial FAIL {src}->{target} {:?}: {e}", t0.elapsed());
             TCP_RELAY_ERRORS.fetch_add(1, Ordering::Relaxed);
             return;
         }
     };
 
-    tracing::info!("[TCP] relay {src} <-> {target}");
+    let dial_time = t0.elapsed();
+    tracing::info!("[TCP] dial OK {src} <-> {target} {dial_time:?}");
 
     if let Err(e) = relay_tcp(tcp_stream, remote).await {
         if e.kind() == io::ErrorKind::TimedOut {
             TCP_RELAY_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
         } else {
             TCP_RELAY_ERRORS.fetch_add(1, Ordering::Relaxed);
-            tracing::info!("[TCP] err {src}<->{target} {:?}: {e}", start.elapsed());
+            tracing::info!("[TCP] err {src}<->{target} {:?}: {e}", t0.elapsed());
         }
     } else {
-        tracing::info!("[TCP] done {src}<->{target} {:?}", start.elapsed());
+        tracing::info!("[TCP] done {src}<->{target} {:?}", t0.elapsed());
     }
 }
 
