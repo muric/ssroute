@@ -28,7 +28,6 @@ static TCP_RELAY_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
 static UDP_RELAY_ERRORS: AtomicU64 = AtomicU64::new(0);
 static ICMP_REPLIES: AtomicU64 = AtomicU64::new(0);
 
-/// Async TUN device wrapper — uses epoll via tokio, never blocks worker threads.
 struct TunDevice {
     async_fd: AsyncFd<OwnedFd>,
 }
@@ -43,9 +42,7 @@ impl TunDevice {
             let mut guard = self.async_fd.readable().await?;
             match guard.try_io(|inner| {
                 let fd = inner.as_raw_fd();
-                let n = unsafe {
-                    nix::libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len())
-                };
+                let n = unsafe { nix::libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len()) };
                 if n < 0 { Err(io::Error::last_os_error()) } else { Ok(n as usize) }
             }) {
                 Ok(result) => return result,
@@ -54,7 +51,6 @@ impl TunDevice {
         }
     }
 
-    /// Async write to TUN — waits if buffer is full instead of dropping packets.
     async fn write(&self, data: &[u8]) {
         loop {
             let mut guard = match self.async_fd.writable().await {
@@ -63,9 +59,7 @@ impl TunDevice {
             };
             match guard.try_io(|inner| {
                 let fd = inner.as_raw_fd();
-                let n = unsafe {
-                    nix::libc::write(fd, data.as_ptr() as *const _, data.len())
-                };
+                let n = unsafe { nix::libc::write(fd, data.as_ptr() as *const _, data.len()) };
                 if n < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
             }) {
                 Ok(_) => return,
@@ -101,66 +95,65 @@ impl Tunnel {
 
         if let Some(runner) = runner {
             tasks.push(tokio::spawn(async move {
-                if let Err(e) = runner.await {
-                    tracing::error!("netstack runner error: {e}");
-                }
+                if let Err(e) = runner.await { tracing::error!("netstack runner: {e}"); }
             }));
         }
 
         let tcp_listener = tcp_listener.expect("TCP listener");
         let udp_socket = udp_socket.expect("UDP socket");
 
-        // ---- Task: TUN ↔ Stack (SINGLE task, NO split, NO BiLock) ----
-        // Owns the Stack directly. Biased select prioritizes outgoing packets
-        // so SYN-ACK and response data reach the client ASAP.
+        // split() — each half goes to its own task for TRUE concurrent I/O.
+        // BiLock overhead is minimal (microsecond lock per poll).
+        let (mut stack_sink, mut stack_stream) = stack.split();
+
+        // ---- Task 1: TUN read → Stack sink (with ICMP interception) ----
         {
             let tun = tun.clone();
             let shutdown_rx = shutdown_rx.clone();
-            let mut stack = stack;
 
             tasks.push(tokio::spawn(async move {
                 let mut buf = vec![0u8; mtu as usize + 4];
-
                 loop {
-                    if *shutdown_rx.borrow() {
-                        return;
+                    if *shutdown_rx.borrow() { return; }
+
+                    let n = match tun.read(&mut buf).await {
+                        Ok(0) => continue,
+                        Ok(n) => n,
+                        Err(_) if *shutdown_rx.borrow() => return,
+                        Err(e) => { tracing::debug!("TUN read: {e}"); continue; }
+                    };
+
+                    let pkt = &buf[..n];
+
+                    if let Some(reply) = icmp::handle_icmp_echo(pkt) {
+                        tun.write(&reply).await;
+                        ICMP_REPLIES.fetch_add(1, Ordering::Relaxed);
+                        continue;
                     }
 
-                    tokio::select! {
-                        biased;
+                    let frame: netstack_smoltcp::AnyIpPktFrame = pkt.to_vec().into();
+                    if let Err(e) = stack_sink.send(frame).await {
+                        if !*shutdown_rx.borrow() { tracing::debug!("sink: {e}"); }
+                    }
+                }
+            }));
+        }
 
-                        // Priority 1: deliver outgoing packets from stack to TUN
-                        frame = stack.next() => {
+        // ---- Task 2: Stack stream → TUN write ----
+        // Runs concurrently with Task 1 — no blocking, no priority bias.
+        {
+            let tun = tun.clone();
+            let mut shutdown_rx = shutdown_rx.clone();
+
+            tasks.push(tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => return,
+                        frame = stack_stream.next() => {
                             match frame {
                                 Some(Ok(data)) => tun.write(data.as_ref()).await,
-                                Some(Err(e)) => tracing::debug!("stack stream error: {e}"),
+                                Some(Err(e)) => tracing::debug!("stream: {e}"),
                                 None => return,
-                            }
-                        }
-
-                        // Priority 2: read from TUN, inject into stack
-                        result = tun.read(&mut buf) => {
-                            match result {
-                                Ok(n) if n > 0 => {
-                                    let pkt = &buf[..n];
-
-                                    // ICMP interception
-                                    if let Some(reply) = icmp::handle_icmp_echo(pkt) {
-                                        tun.write(&reply).await;
-                                        ICMP_REPLIES.fetch_add(1, Ordering::Relaxed);
-                                        continue;
-                                    }
-
-                                    let frame: netstack_smoltcp::AnyIpPktFrame =
-                                        pkt.to_vec().into();
-                                    if let Err(e) = stack.send(frame).await {
-                                        tracing::debug!("stack sink error: {e}");
-                                    }
-                                }
-                                Err(e) if !*shutdown_rx.borrow() => {
-                                    tracing::debug!("TUN read error: {e}");
-                                }
-                                _ => {}
                             }
                         }
                     }
@@ -222,21 +215,17 @@ impl Tunnel {
                             let dst = remote_addr;
                             let key = (src, dst);
 
-                            // Quick lock: check existing or insert channel immediately
                             let mut map = sessions.lock().await;
                             if let Some(tx) = map.get(&key) {
                                 let tx = tx.clone();
                                 drop(map);
                                 let _ = tx.send(payload).await;
                             } else {
-                                // Insert channel NOW, unlock, create SS session in background
                                 let (fwd_tx, fwd_rx) = mpsc::channel::<Vec<u8>>(256);
                                 map.insert(key, fwd_tx.clone());
-                                drop(map); // UNLOCK — held for microseconds only
+                                drop(map);
 
-                                // Buffer the first packet
                                 let _ = fwd_tx.send(payload).await;
-
                                 ACTIVE_UDP_RELAYS.fetch_add(1, Ordering::Relaxed);
                                 tracing::info!("[UDP] new {src} <-> {dst}");
 
@@ -246,29 +235,18 @@ impl Tunnel {
                                 tokio::spawn(async move {
                                     match proxy.new_udp_session(dst).await {
                                         Ok(session) => {
-                                            // Forward buffered + future packets to SS
                                             let ss_tx = session.outgoing;
                                             let mut fwd_rx = fwd_rx;
                                             tokio::spawn(async move {
-                                                while let Some(data) = fwd_rx.recv().await {
-                                                    if ss_tx.send(data).await.is_err() { break; }
+                                                while let Some(d) = fwd_rx.recv().await {
+                                                    if ss_tx.send(d).await.is_err() { break; }
                                                 }
                                             });
-
-                                            // Reverse relay: SS → local
                                             let mut incoming = session.incoming;
                                             loop {
-                                                match tokio::time::timeout(
-                                                    UDP_SESSION_TIMEOUT,
-                                                    incoming.recv(),
-                                                ).await {
+                                                match tokio::time::timeout(UDP_SESSION_TIMEOUT, incoming.recv()).await {
                                                     Ok(Some(data)) => {
-                                                        if uw.lock().await
-                                                            .send((data, src, dst)).await
-                                                            .is_err()
-                                                        {
-                                                            break;
-                                                        }
+                                                        if uw.lock().await.send((data, src, dst)).await.is_err() { break; }
                                                     }
                                                     _ => break,
                                                 }
