@@ -147,7 +147,7 @@ nano ssroute.conf
 ```ini
 gateway=10.0.0.1
 interface=tun2
-goroutine_count=100
+concurrency=100
 debug=false
 ss_enabled=false
 ```
@@ -158,7 +158,7 @@ ss_enabled=false
 # TUN-интерфейс
 gateway=10.0.0.1
 interface=tun2
-goroutine_count=100
+concurrency=100
 debug=false
 mtu=1400
 
@@ -189,7 +189,7 @@ obfs_mode=disable
 | `interface` | Имя TUN-интерфейса (например `tun2`) | (обязательный) |
 | `default_gw` | Шлюз для маршрутов из `default_route/` | (опционально) |
 | `default_interface` | Интерфейс для маршрутов из `default_route/` | (опционально) |
-| `goroutine_count` | Количество параллельных воркеров для загрузки маршрутов | `4` |
+| `concurrency` | Количество параллельных воркеров для загрузки маршрутов | `4` |
 | `debug` | Подробное логирование ошибок маршрутизации | `false` |
 | `mtu` | MTU для TUN-интерфейса (0 = авто 1500) | `0` |
 | `ss_enabled` | Включить daemon-режим с Shadowsocks | `false` |
@@ -486,7 +486,7 @@ Format: `key=value`, lines starting with `#` are comments, blank lines are ignor
 ```ini
 gateway=10.0.0.1
 interface=tun2
-goroutine_count=100
+concurrency=100
 debug=false
 ss_enabled=false
 ```
@@ -497,7 +497,7 @@ ss_enabled=false
 # TUN interface
 gateway=10.0.0.1
 interface=tun2
-goroutine_count=100
+concurrency=100
 debug=false
 mtu=1400
 
@@ -528,7 +528,7 @@ obfs_mode=disable
 | `interface` | TUN interface name (e.g. `tun2`) | (required) |
 | `default_gw` | Gateway for routes in `default_route/` dir | (optional) |
 | `default_interface` | Interface for routes in `default_route/` dir | (optional) |
-| `goroutine_count` | Parallel workers for route loading | `4` |
+| `concurrency` | Parallel workers for route loading | `4` |
 | `debug` | Verbose error logging for routes | `false` |
 | `mtu` | TUN MTU (0 = auto 1500) | `0` |
 | `ss_enabled` | Enable Shadowsocks daemon mode | `false` |

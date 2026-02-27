@@ -174,10 +174,14 @@ impl Tunnel {
         }
 
         // ---- Task: TCP handler ----
+        // Track active connections to deduplicate — smoltcp may yield the same
+        // 4-tuple multiple times when the client retransmits SYN.
         {
             let proxy = proxy.clone();
             let mut shutdown_rx = shutdown_rx.clone();
             let mut tcp_listener = tcp_listener;
+            let active_tcp: Arc<Mutex<std::collections::HashSet<(SocketAddr, SocketAddr)>>> =
+                Arc::new(Mutex::new(std::collections::HashSet::new()));
 
             tasks.push(tokio::spawn(async move {
                 loop {
@@ -186,9 +190,22 @@ impl Tunnel {
                         conn = tcp_listener.next() => {
                             match conn {
                                 Some((stream, local_addr, remote_addr)) => {
+                                    // netstack-smoltcp: local_addr=src(client), remote_addr=dst(target)
+                                    let key = (local_addr, remote_addr);
+
+                                    {
+                                        let mut set = active_tcp.lock().await;
+                                        if !set.insert(key) {
+                                            // Duplicate connection, skip
+                                            continue;
+                                        }
+                                    }
+
                                     let proxy = proxy.clone();
+                                    let active_tcp = active_tcp.clone();
                                     tokio::spawn(async move {
                                         handle_tcp(stream, local_addr, remote_addr, proxy).await;
+                                        active_tcp.lock().await.remove(&key);
                                     });
                                 }
                                 None => return,

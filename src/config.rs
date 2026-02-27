@@ -96,10 +96,10 @@ pub fn read_config(path: &Path) -> Result<Config> {
             "interface" => config.interface = value.to_string(),
             "default_gw" => config.default_gateway = value.to_string(),
             "default_interface" => config.default_interface = value.to_string(),
-            "goroutine_count" => {
+            "goroutine_count" | "concurrency" => {
                 config.concurrency = value
                     .parse()
-                    .with_context(|| format!("invalid goroutine_count value '{value}'"))?;
+                    .with_context(|| format!("invalid concurrency value '{value}'"))?;
             }
             "debug" => {
                 config.debug = parse_bool(value)
@@ -183,7 +183,7 @@ mod tests {
              interface=tun2\n\
              default_gw=192.168.1.1\n\
              default_interface=eth0\n\
-             goroutine_count=100\n\
+             concurrency=100\n\
              debug=true\n\
              mtu=1400\n\
              ss_enabled=true\n\

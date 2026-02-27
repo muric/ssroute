@@ -6,10 +6,11 @@ gateway=10.0.0.1
 # Example: tun0, tun2
 interface=tun2
 
-# Number of concurrent workers for parallel route processing.
+# Number of concurrent workers for parallel route loading.
 # Higher values speed up route loading on multi-core systems.
+# Also accepts legacy name "goroutine_count" for compatibility.
 # Example: 100, 500, 1000
-goroutine_count=4
+concurrency=4
 
 # Enable verbose error logging for route operations
 # Values: true, false
