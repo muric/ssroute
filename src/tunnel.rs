@@ -18,7 +18,6 @@ use crate::proxy::SsProxy;
 
 const TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const UDP_SESSION_TIMEOUT: Duration = Duration::from_secs(120);
-const TCP_RELAY_BUF_SIZE: usize = 32 * 1024;
 const METRICS_LOG_PERIOD: Duration = Duration::from_secs(30);
 
 static ACTIVE_TCP_RELAYS: AtomicI64 = AtomicI64::new(0);
@@ -297,7 +296,11 @@ impl Tunnel {
 
     pub async fn close(self) {
         let _ = self.shutdown.send(true);
-        for t in self.tasks { t.abort(); let _ = t.await; }
+        for t in &self.tasks { t.abort(); }
+        // Wait up to 3 seconds for tasks to finish, then give up
+        let _ = tokio::time::timeout(Duration::from_secs(3), async {
+            for t in self.tasks { let _ = t.await; }
+        }).await;
     }
 }
 
