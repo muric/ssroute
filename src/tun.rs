@@ -67,12 +67,6 @@ pub fn create_tun(name: &str, persistent: bool) -> Result<Option<OwnedFd>> {
     Ok(Some(owned))
 }
 
-/// Set the TUN fd to non-blocking mode.
-pub fn set_nonblock(fd: RawFd) -> Result<()> {
-    nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK))
-        .context("set non-blocking mode on TUN fd")?;
-    Ok(())
-}
 
 /// Configure TUN interface: assign IP address (gateway/24), set MTU, bring up.
 pub async fn configure_tun(name: &str, gateway: &str, mtu: u16) -> Result<()> {
