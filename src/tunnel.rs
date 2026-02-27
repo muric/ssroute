@@ -269,6 +269,7 @@ impl Tunnel {
                                     ACTIVE_UDP_RELAYS.fetch_sub(1, Ordering::Relaxed);
                                 });
                             }
+                        }
                     }
                 }
             }));
