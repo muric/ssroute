@@ -356,7 +356,10 @@ where A: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin,
 async fn copy_timeout<R, W>(r: &mut R, w: &mut W) -> io::Result<u64>
 where R: AsyncRead + Unpin, W: AsyncWrite + Unpin,
 {
-    let mut buf = vec![0u8; TCP_RELAY_BUF_SIZE];
+    // No flush() per write — let TCP handle flow control naturally.
+    // flush() after every write blocks when send buffer is full,
+    // choking throughput on high-bandwidth connections.
+    let mut buf = vec![0u8; 64 * 1024]; // 64KB buffer for better throughput
     let mut total: u64 = 0;
     loop {
         let n = match tokio::time::timeout(TCP_IDLE_TIMEOUT, r.read(&mut buf)).await {
@@ -366,7 +369,6 @@ where R: AsyncRead + Unpin, W: AsyncWrite + Unpin,
             Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "idle")),
         };
         w.write_all(&buf[..n]).await?;
-        w.flush().await?;
         total += n as u64;
     }
 }
