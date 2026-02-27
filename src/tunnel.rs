@@ -54,9 +54,24 @@ impl TunDevice {
         }
     }
 
-    fn write(&self, data: &[u8]) {
-        let fd = self.async_fd.as_raw_fd();
-        unsafe { nix::libc::write(fd, data.as_ptr() as *const _, data.len()); }
+    /// Async write to TUN — waits if buffer is full instead of dropping packets.
+    async fn write(&self, data: &[u8]) {
+        loop {
+            let mut guard = match self.async_fd.writable().await {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            match guard.try_io(|inner| {
+                let fd = inner.as_raw_fd();
+                let n = unsafe {
+                    nix::libc::write(fd, data.as_ptr() as *const _, data.len())
+                };
+                if n < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+            }) {
+                Ok(_) => return,
+                Err(_would_block) => continue,
+            }
+        }
     }
 }
 
@@ -117,7 +132,7 @@ impl Tunnel {
                         // Priority 1: deliver outgoing packets from stack to TUN
                         frame = stack.next() => {
                             match frame {
-                                Some(Ok(data)) => tun.write(data.as_ref()),
+                                Some(Ok(data)) => tun.write(data.as_ref()).await,
                                 Some(Err(e)) => tracing::debug!("stack stream error: {e}"),
                                 None => return,
                             }
@@ -131,14 +146,16 @@ impl Tunnel {
 
                                     // ICMP interception
                                     if let Some(reply) = icmp::handle_icmp_echo(pkt) {
-                                        tun.write(&reply);
+                                        tun.write(&reply).await;
                                         ICMP_REPLIES.fetch_add(1, Ordering::Relaxed);
                                         continue;
                                     }
 
+                                    // feed() = push without expensive flush
+                                    // (flush happens implicitly when stack is polled by next())
                                     let frame: netstack_smoltcp::AnyIpPktFrame =
                                         pkt.to_vec().into();
-                                    if let Err(e) = stack.send(frame).await {
+                                    if let Err(e) = stack.feed(frame).await {
                                         tracing::debug!("stack sink error: {e}");
                                     }
                                 }

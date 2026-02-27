@@ -89,7 +89,7 @@ impl SsProxy {
                         match pkt {
                             Some(data) => {
                                 if let Err(e) = proxy_socket.send(&addr, &data).await {
-                                    tracing::debug!("[UDP] SS send error: {e}");
+                                    tracing::warn!("[UDP] SS send error: {e}");
                                     break;
                                 }
                             }
@@ -105,7 +105,7 @@ impl SsProxy {
                                 }
                             }
                             Err(e) => {
-                                tracing::debug!("[UDP] SS recv error: {e}");
+                                tracing::warn!("[UDP] SS recv error: {e}");
                                 break;
                             }
                         }
