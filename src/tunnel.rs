@@ -151,11 +151,9 @@ impl Tunnel {
                                         continue;
                                     }
 
-                                    // feed() = push without expensive flush
-                                    // (flush happens implicitly when stack is polled by next())
                                     let frame: netstack_smoltcp::AnyIpPktFrame =
                                         pkt.to_vec().into();
-                                    if let Err(e) = stack.feed(frame).await {
+                                    if let Err(e) = stack.send(frame).await {
                                         tracing::debug!("stack sink error: {e}");
                                     }
                                 }
