@@ -38,7 +38,6 @@ impl Tunnel {
         let proxy = Arc::new(proxy);
         let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-        // Build netstack-smoltcp
         let (stack, runner, udp_socket, tcp_listener) =
             netstack_smoltcp::StackBuilder::default()
                 .stack_buffer_size(512)
@@ -60,13 +59,16 @@ impl Tunnel {
         let tcp_listener = tcp_listener.expect("TCP listener should exist");
         let udp_socket = udp_socket.expect("UDP socket should exist");
 
-        // Channels for TUN <-> Stack communication (avoids BiLock from futures::split)
-        let (tun_to_stack_tx, tun_to_stack_rx) = mpsc::channel::<Vec<u8>>(512);
-        let (stack_to_tun_tx, stack_to_tun_rx) = mpsc::channel::<Vec<u8>>(512);
+        // Split stack into sink + stream — each owned by a separate task
+        let (stack_sink, stack_stream) = stack.split();
+
+        // Channels between TUN I/O and stack halves
+        let (tun_to_sink_tx, mut tun_to_sink_rx) = mpsc::channel::<Vec<u8>>(512);
+        let (stream_to_tun_tx, mut stream_to_tun_rx) = mpsc::channel::<Vec<u8>>(512);
 
         let tun_fd = Arc::new(tun_fd);
 
-        // ---- Task: TUN reader (blocking I/O in spawn_blocking) ----
+        // ---- Task: TUN reader → channel ----
         {
             let tun_fd_read = tun_fd.clone();
             let tun_fd_icmp = tun_fd.clone();
@@ -93,103 +95,76 @@ impl Tunnel {
                     }
 
                     let n = unsafe {
-                        nix::libc::read(
-                            fd,
-                            buf.as_mut_ptr() as *mut nix::libc::c_void,
-                            buf.len(),
-                        )
+                        nix::libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len())
                     };
                     if n <= 0 {
                         continue;
                     }
-                    let n = n as usize;
-                    let pkt = &buf[..n];
+                    let pkt = &buf[..n as usize];
 
-                    // ICMP interception
                     if let Some(reply) = icmp::handle_icmp_echo(pkt) {
                         unsafe {
-                            nix::libc::write(
-                                icmp_fd,
-                                reply.as_ptr() as *const nix::libc::c_void,
-                                reply.len(),
-                            );
+                            nix::libc::write(icmp_fd, reply.as_ptr() as *const _, reply.len());
                         }
                         ICMP_REPLIES.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
 
-                    if tun_to_stack_tx.send(pkt.to_vec()).await.is_err() {
+                    if tun_to_sink_tx.send(pkt.to_vec()).await.is_err() {
                         return;
                     }
                 }
             }));
         }
 
-        // ---- Task: TUN writer ----
+        // ---- Task: channel → Stack sink (owns SplitSink exclusively) ----
         {
-            let tun_fd_write = tun_fd.clone();
-            let mut shutdown_rx = shutdown_rx.clone();
-            let mut stack_to_tun_rx = stack_to_tun_rx;
-
+            let mut sink = stack_sink;
             tasks.push(tokio::spawn(async move {
-                let fd = tun_fd_write.as_raw_fd();
-                loop {
-                    tokio::select! {
-                        _ = shutdown_rx.changed() => return,
-                        pkt = stack_to_tun_rx.recv() => {
-                            match pkt {
-                                Some(data) => {
-                                    unsafe {
-                                        nix::libc::write(
-                                            fd,
-                                            data.as_ptr() as *const nix::libc::c_void,
-                                            data.len(),
-                                        );
-                                    }
-                                }
-                                None => return,
+                while let Some(data) = tun_to_sink_rx.recv().await {
+                    let frame: netstack_smoltcp::AnyIpPktFrame = data.into();
+                    if let Err(e) = sink.send(frame).await {
+                        tracing::debug!("Stack sink error: {e}");
+                    }
+                }
+            }));
+        }
+
+        // ---- Task: Stack stream → channel (owns SplitStream exclusively) ----
+        {
+            let mut stream = stack_stream;
+            tasks.push(tokio::spawn(async move {
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok(frame) => {
+                            let data: Vec<u8> = frame.into();
+                            if stream_to_tun_tx.send(data).await.is_err() {
+                                return;
                             }
+                        }
+                        Err(e) => {
+                            tracing::debug!("Stack stream error: {e}");
                         }
                     }
                 }
             }));
         }
 
-        // ---- Task: Stack handler (single task, no split/BiLock) ----
-        // Handles both directions: TUN→Stack and Stack→TUN
+        // ---- Task: channel → TUN writer ----
         {
+            let tun_fd_write = tun_fd.clone();
             let mut shutdown_rx = shutdown_rx.clone();
-            let mut tun_to_stack_rx = tun_to_stack_rx;
-            let mut stack = stack;
 
             tasks.push(tokio::spawn(async move {
+                let fd = tun_fd_write.as_raw_fd();
                 loop {
                     tokio::select! {
                         _ = shutdown_rx.changed() => return,
-
-                        // Inject packet from TUN into the stack
-                        pkt = tun_to_stack_rx.recv() => {
+                        pkt = stream_to_tun_rx.recv() => {
                             match pkt {
-                                Some(data) => {
-                                    let frame: netstack_smoltcp::AnyIpPktFrame = data.into();
-                                    if let Err(e) = stack.send(frame).await {
-                                        tracing::debug!("Stack send error: {e}");
-                                    }
-                                }
-                                None => return,
-                            }
-                        }
-
-                        // Extract outgoing packet from the stack to TUN
-                        frame = stack.next() => {
-                            match frame {
-                                Some(Ok(data)) => {
-                                    let bytes: Vec<u8> = data.into();
-                                    let _ = stack_to_tun_tx.send(bytes).await;
-                                }
-                                Some(Err(e)) => {
-                                    tracing::debug!("Stack recv error: {e}");
-                                }
+                                Some(data) => unsafe {
+                                    nix::libc::write(fd, data.as_ptr() as *const _, data.len());
+                                },
                                 None => return,
                             }
                         }
@@ -210,10 +185,10 @@ impl Tunnel {
                         _ = shutdown_rx.changed() => return,
                         conn = tcp_listener.next() => {
                             match conn {
-                                Some((tcp_stream, local_addr, remote_addr)) => {
+                                Some((stream, local_addr, remote_addr)) => {
                                     let proxy = proxy.clone();
                                     tokio::spawn(async move {
-                                        handle_tcp(tcp_stream, local_addr, remote_addr, proxy).await;
+                                        handle_tcp(stream, local_addr, remote_addr, proxy).await;
                                     });
                                 }
                                 None => return,
@@ -243,7 +218,7 @@ impl Tunnel {
                                 return;
                             };
 
-                            // In netstack-smoltcp: local_addr = source (client), remote_addr = destination
+                            // netstack-smoltcp: local_addr=source(client), remote_addr=destination(target)
                             let src = local_addr;
                             let dst = remote_addr;
                             let key = (src, dst);
@@ -273,46 +248,33 @@ impl Tunnel {
                                         }
                                     };
 
-                                    tracing::info!("[UDP] new session {src} <-> {dst}");
+                                    tracing::info!("[UDP] {src} <-> {dst}");
 
                                     let tx = session.outgoing.clone();
                                     {
                                         let mut map = sessions.lock().await;
                                         map.insert(key, session.outgoing);
                                     }
-
                                     let _ = tx.send(payload).await;
 
-                                    // Reverse relay task
                                     let sessions_cleanup = sessions.clone();
                                     let udp_write_clone = udp_write.clone();
                                     tokio::spawn(async move {
                                         let mut incoming = session.incoming;
                                         loop {
-                                            let recv = tokio::time::timeout(
-                                                UDP_SESSION_TIMEOUT,
-                                                incoming.recv(),
-                                            )
-                                            .await;
-
-                                            match recv {
+                                            match tokio::time::timeout(UDP_SESSION_TIMEOUT, incoming.recv()).await {
                                                 Ok(Some(data)) => {
+                                                    // Write back: swap src/dst for return path
                                                     let msg = (data, src, dst);
-                                                    let mut writer = udp_write_clone.lock().await;
-                                                    if let Err(e) = writer.send(msg).await {
-                                                        tracing::debug!("[UDP] write back error: {e}");
+                                                    let mut w = udp_write_clone.lock().await;
+                                                    if w.send(msg).await.is_err() {
                                                         break;
                                                     }
                                                 }
-                                                Ok(None) => break,
-                                                Err(_) => {
-                                                    tracing::debug!("[UDP] timeout {src} <-> {dst}");
-                                                    break;
-                                                }
+                                                _ => break,
                                             }
                                         }
-                                        let mut map = sessions_cleanup.lock().await;
-                                        map.remove(&key);
+                                        sessions_cleanup.lock().await.remove(&key);
                                         ACTIVE_UDP_RELAYS.fetch_sub(1, Ordering::Relaxed);
                                     });
                                 }
@@ -371,16 +333,14 @@ async fn handle_tcp(
     ACTIVE_TCP_RELAYS.fetch_add(1, Ordering::Relaxed);
     struct Guard;
     impl Drop for Guard {
-        fn drop(&mut self) {
-            ACTIVE_TCP_RELAYS.fetch_sub(1, Ordering::Relaxed);
-        }
+        fn drop(&mut self) { ACTIVE_TCP_RELAYS.fetch_sub(1, Ordering::Relaxed); }
     }
     let _guard = Guard;
 
-    let start = Instant::now();
-    // In netstack-smoltcp: local_addr = source (client), remote_addr = destination (target)
+    // netstack-smoltcp: local_addr=source(client), remote_addr=destination(target)
     let src = local_addr;
     let target = remote_addr;
+    let start = Instant::now();
 
     let remote_stream = match proxy.dial_tcp(target).await {
         Ok(s) => s,
@@ -402,8 +362,7 @@ async fn handle_tcp(
             tracing::info!("[TCP] error {src} <-> {target} after {elapsed:?}: {e}");
         }
     } else {
-        let elapsed = start.elapsed();
-        tracing::info!("[TCP] done {src} <-> {target} after {elapsed:?}");
+        tracing::info!("[TCP] done {src} <-> {target} after {:?}", start.elapsed());
     }
 }
 
@@ -412,32 +371,26 @@ where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
-    let (mut a_read, mut a_write) = tokio::io::split(&mut a);
-    let (mut b_read, mut b_write) = tokio::io::split(&mut b);
+    let (mut ar, mut aw) = tokio::io::split(&mut a);
+    let (mut br, mut bw) = tokio::io::split(&mut b);
 
-    let a_to_b = copy_with_timeout(&mut a_read, &mut b_write, TCP_IDLE_TIMEOUT);
-    let b_to_a = copy_with_timeout(&mut b_read, &mut a_write, TCP_IDLE_TIMEOUT);
+    let a_to_b = copy_with_timeout(&mut ar, &mut bw, TCP_IDLE_TIMEOUT);
+    let b_to_a = copy_with_timeout(&mut br, &mut aw, TCP_IDLE_TIMEOUT);
 
     tokio::select! {
         r = a_to_b => r?,
         r = b_to_a => r?,
     };
-
     Ok(())
 }
 
-async fn copy_with_timeout<R, W>(
-    reader: &mut R,
-    writer: &mut W,
-    timeout: Duration,
-) -> io::Result<u64>
+async fn copy_with_timeout<R, W>(reader: &mut R, writer: &mut W, timeout: Duration) -> io::Result<u64>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     let mut buf = vec![0u8; TCP_RELAY_BUF_SIZE];
     let mut total: u64 = 0;
-
     loop {
         let n = match tokio::time::timeout(timeout, reader.read(&mut buf)).await {
             Ok(Ok(0)) => return Ok(total),
@@ -445,8 +398,8 @@ where
             Ok(Err(e)) => return Err(e),
             Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "idle timeout")),
         };
-
         writer.write_all(&buf[..n]).await?;
+        writer.flush().await?;
         total += n as u64;
     }
 }
