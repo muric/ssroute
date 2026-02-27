@@ -218,51 +218,57 @@ impl Tunnel {
                         _ = shutdown_rx.changed() => return,
                         msg = udp_read.next() => {
                             let Some((payload, local_addr, remote_addr)) = msg else { return; };
+                            // netstack-smoltcp: local=src(client), remote=dst(target)
                             let src = local_addr;
                             let dst = remote_addr;
                             let key = (src, dst);
-                            let proxy = proxy.clone();
-                            let sessions = sessions.clone();
-                            let udp_write = udp_write.clone();
 
-                            tokio::spawn(async move {
-                                let existing = sessions.lock().await.get(&key).cloned();
-                                if let Some(tx) = existing {
-                                    let _ = tx.send(payload).await;
-                                } else {
-                                    ACTIVE_UDP_RELAYS.fetch_add(1, Ordering::Relaxed);
-                                    let session = match proxy.new_udp_session(dst).await {
-                                        Ok(s) => s,
-                                        Err(e) => {
-                                            tracing::warn!("[UDP] dial {src}->{dst}: {e}");
-                                            UDP_RELAY_ERRORS.fetch_add(1, Ordering::Relaxed);
-                                            ACTIVE_UDP_RELAYS.fetch_sub(1, Ordering::Relaxed);
-                                            return;
-                                        }
-                                    };
-                                    tracing::info!("[UDP] {src} <-> {dst}");
-                                    let tx = session.outgoing.clone();
-                                    sessions.lock().await.insert(key, session.outgoing);
-                                    let _ = tx.send(payload).await;
+                            // Atomic check-and-create under a single lock — no race condition.
+                            // tokio::sync::Mutex is safe to hold across .await
+                            let mut map = sessions.lock().await;
 
-                                    let cleanup = sessions.clone();
-                                    let uw = udp_write.clone();
-                                    tokio::spawn(async move {
-                                        let mut rx = session.incoming;
-                                        loop {
-                                            match tokio::time::timeout(UDP_SESSION_TIMEOUT, rx.recv()).await {
-                                                Ok(Some(data)) => {
-                                                    if uw.lock().await.send((data, src, dst)).await.is_err() { break; }
-                                                }
-                                                _ => break,
-                                            }
-                                        }
-                                        cleanup.lock().await.remove(&key);
+                            if let Some(tx) = map.get(&key) {
+                                let tx = tx.clone();
+                                drop(map);
+                                let _ = tx.send(payload).await;
+                            } else {
+                                ACTIVE_UDP_RELAYS.fetch_add(1, Ordering::Relaxed);
+
+                                let session = match proxy.new_udp_session(dst).await {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        drop(map);
+                                        tracing::warn!("[UDP] dial {src}->{dst}: {e}");
+                                        UDP_RELAY_ERRORS.fetch_add(1, Ordering::Relaxed);
                                         ACTIVE_UDP_RELAYS.fetch_sub(1, Ordering::Relaxed);
-                                    });
-                                }
-                            });
-                        }
+                                        continue;
+                                    }
+                                };
+
+                                tracing::info!("[UDP] {src} <-> {dst}");
+                                let tx = session.outgoing.clone();
+                                map.insert(key, tx.clone());
+                                drop(map); // unlock before sending
+
+                                let _ = tx.send(payload).await;
+
+                                // Spawn reverse relay (SS → local)
+                                let cleanup = sessions.clone();
+                                let uw = udp_write.clone();
+                                tokio::spawn(async move {
+                                    let mut rx = session.incoming;
+                                    loop {
+                                        match tokio::time::timeout(UDP_SESSION_TIMEOUT, rx.recv()).await {
+                                            Ok(Some(data)) => {
+                                                if uw.lock().await.send((data, src, dst)).await.is_err() { break; }
+                                            }
+                                            _ => break,
+                                        }
+                                    }
+                                    cleanup.lock().await.remove(&key);
+                                    ACTIVE_UDP_RELAYS.fetch_sub(1, Ordering::Relaxed);
+                                });
+                            }
                     }
                 }
             }));
