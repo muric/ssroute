@@ -75,7 +75,7 @@ pub fn create_tun(name: &str, persistent: bool) -> Result<Option<OwnedFd>> {
 pub async fn configure_tun(name: &str, gateway: &str, mtu: u16) -> Result<()> {
     let (connection, handle, _) = rtnetlink::new_connection()
         .context("create netlink connection")?;
-    tokio::spawn(connection);
+    let _conn = tokio::spawn(connection);
 
     // Find link by name
     use futures::TryStreamExt;

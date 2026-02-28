@@ -94,7 +94,7 @@ pub async fn add_routes_from_dir(
 
     let (connection, handle, _) =
         rtnetlink::new_connection().context("create netlink connection for routes")?;
-    tokio::spawn(connection);
+    let _conn = tokio::spawn(connection);
 
     let iface_index = get_iface_index(&handle, iface_name).await.map_err(|e| {
         let err_str = format!("{e}");
