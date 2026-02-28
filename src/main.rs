@@ -132,6 +132,11 @@ async fn run_daemon_mode(config: &config::Config) -> Result<()> {
         plugin::stop_plugin(&mut p).await;
     }
 
+    // Ensure duplicates writer flushes before exit
+    if let Some(s) = Arc::into_inner(stats) {
+        let mut s = s;
+        s.shutdown().await;
+    }
     Ok(())
 }
 
