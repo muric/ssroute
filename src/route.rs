@@ -116,7 +116,7 @@ pub async fn add_routes_from_dir(
     }
 
     if json_files.is_empty() {
-        tracing::info!("No route files found in {dir} — skipping");
+        tracing::info!("No route files found in {} — skipping", dir.display());
         return Ok(());
     }
 
