@@ -4,7 +4,7 @@ set -euo pipefail
 # ssroute installer — downloads and installs the latest release.
 # Usage: curl -sSL https://github.com/<user>/ssroute/releases/latest/download/install.sh | sudo bash
 
-REPO="pnv1/ssroute"  # TODO: update with actual GitHub user/org
+REPO="muric/ssroute"
 INSTALL_DIR="/usr/bin"
 CONFIG_DIR="/etc/ssroute"
 SYSTEMD_DIR="/etc/systemd/system"

@@ -88,7 +88,7 @@ ssroute — демон прозрачной маршрутизации чере�
 #### Быстрая установка из GitHub-релиза
 
 ```bash
-curl -sSL https://github.com/pnv1/ssroute/releases/latest/download/install.sh | sudo bash
+curl -sSL https://github.com/muric/ssroute/releases/latest/download/install.sh | sudo bash
 ```
 
 Скрипт автоматически определит архитектуру (x86_64/ARM), скачает бинарник, установит в `/usr/bin/ssroute`, скопирует маршруты в `/etc/ssroute/`, создаст systemd-сервис. Конфиг (`/etc/ssroute/ssroute.conf`) создаётся из шаблона только при первой установке и **не затирается при обновлениях**.
@@ -390,7 +390,7 @@ This allows flexible traffic splitting: some IPs go through the SS tunnel, the r
 #### Quick install from GitHub release
 
 ```bash
-curl -sSL https://github.com/pnv1/ssroute/releases/latest/download/install.sh | sudo bash
+curl -sSL https://github.com/muric/ssroute/releases/latest/download/install.sh | sudo bash
 ```
 
 The script auto-detects architecture (x86_64/ARM), downloads the binary, installs to `/usr/bin/ssroute`, copies route data to `/etc/ssroute/`, and creates a systemd service. Config (`/etc/ssroute/ssroute.conf`) is created from template on first install only and **never overwritten on updates**.
