@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ssroute installer — downloads and installs the latest release.
-# Usage: curl -sSL https://github.com/<user>/ssroute/releases/latest/download/install.sh | sudo bash
+# Usage: curl -sSL https://github.com/muric/ssroute/releases/latest/download/install.sh | sudo bash
 
 REPO="muric/ssroute"
 INSTALL_DIR="/usr/bin"
@@ -15,9 +15,9 @@ ARCH="$(uname -m)"
 case "$ARCH" in
     x86_64)  TARGET="x86_64-unknown-linux-gnu" ;;
     aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
-    armv7l)  TARGET="armv7-unknown-linux-gnueabihf" ;;
     *)
         echo "Unsupported architecture: $ARCH"
+        echo "Supported: x86_64, aarch64"
         exit 1
         ;;
 esac
@@ -41,14 +41,14 @@ echo "==> Latest version: $VERSION"
 # --- Download ---
 TARBALL="ssroute-${VERSION}-${TARGET}.tar.gz"
 DOWNLOAD_URL="https://github.com/$REPO/releases/download/$VERSION/$TARBALL"
-TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+EXTRACT_DIR="$(mktemp -d)"
+trap 'rm -rf "$EXTRACT_DIR"' EXIT
 
 echo "==> Downloading $DOWNLOAD_URL ..."
-curl -sSL -o "$TMPDIR/$TARBALL" "$DOWNLOAD_URL"
+curl -sSL -o "$EXTRACT_DIR/$TARBALL" "$DOWNLOAD_URL"
 
 echo "==> Extracting..."
-tar -xzf "$TMPDIR/$TARBALL" -C "$TMPDIR"
+tar -xzf "$EXTRACT_DIR/$TARBALL" --strip-components=1 -C "$EXTRACT_DIR"
 
 # --- Check if service is running (for restart later) ---
 WAS_RUNNING=false
@@ -60,26 +60,26 @@ fi
 
 # --- Install binary ---
 echo "==> Installing binary to $INSTALL_DIR/$SERVICE_NAME"
-install -m 0755 "$TMPDIR/ssroute" "$INSTALL_DIR/$SERVICE_NAME"
+install -m 0755 "$EXTRACT_DIR/ssroute" "$INSTALL_DIR/$SERVICE_NAME"
 
 # --- Install config and data ---
 mkdir -p "$CONFIG_DIR"
 
-if [ -d "$TMPDIR/data" ]; then
+if [ -d "$EXTRACT_DIR/data" ]; then
     echo "==> Updating route data in $CONFIG_DIR/data/"
-    cp -r "$TMPDIR/data" "$CONFIG_DIR/"
+    cp -r "$EXTRACT_DIR/data" "$CONFIG_DIR/"
 fi
 
-if [ -d "$TMPDIR/default_route" ]; then
+if [ -d "$EXTRACT_DIR/default_route" ]; then
     echo "==> Updating default routes in $CONFIG_DIR/default_route/"
-    cp -r "$TMPDIR/default_route" "$CONFIG_DIR/"
+    cp -r "$EXTRACT_DIR/default_route" "$CONFIG_DIR/"
 fi
 
 # Config: only create if missing (never overwrite user config)
 if [ ! -f "$CONFIG_DIR/ssroute.conf" ]; then
-    if [ -f "$TMPDIR/ssroute.conf.example" ]; then
+    if [ -f "$EXTRACT_DIR/ssroute.conf.example" ]; then
         echo "==> Creating initial config at $CONFIG_DIR/ssroute.conf"
-        cp "$TMPDIR/ssroute.conf.example" "$CONFIG_DIR/ssroute.conf"
+        cp "$EXTRACT_DIR/ssroute.conf.example" "$CONFIG_DIR/ssroute.conf"
         echo "    ** Edit $CONFIG_DIR/ssroute.conf before starting the service **"
     fi
 else
@@ -87,10 +87,8 @@ else
 fi
 
 # --- Install systemd service ---
-if [ -f "$TMPDIR/ssroute.service" ]; then
-    cp "$TMPDIR/ssroute.service" "$SYSTEMD_DIR/$SERVICE_NAME.service"
-elif [ -f "$(dirname "$0")/ssroute.service" ]; then
-    cp "$(dirname "$0")/ssroute.service" "$SYSTEMD_DIR/$SERVICE_NAME.service"
+if [ -f "$EXTRACT_DIR/ssroute.service" ]; then
+    cp "$EXTRACT_DIR/ssroute.service" "$SYSTEMD_DIR/$SERVICE_NAME.service"
 fi
 systemctl daemon-reload
 

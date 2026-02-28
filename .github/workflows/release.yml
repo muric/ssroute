@@ -29,7 +29,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        uses: taiki-e/install-action@cross
 
       - name: Build
         run: cross build --release --target ${{ matrix.target }}
