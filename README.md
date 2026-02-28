@@ -85,58 +85,50 @@ ssroute — демон прозрачной маршрутизации чере�
 <a id="ru-installation"></a>
 ### Установка
 
-#### 1. Установка Rust
+#### Быстрая установка из GitHub-релиза
 
 ```bash
+curl -sSL https://github.com/pnv1/ssroute/releases/latest/download/install.sh | sudo bash
+```
+
+Скрипт автоматически определит архитектуру (x86_64/ARM), скачает бинарник, установит в `/usr/bin/ssroute`, скопирует маршруты в `/etc/ssroute/`, создаст systemd-сервис. Конфиг (`/etc/ssroute/ssroute.conf`) создаётся из шаблона только при первой установке и **не затирается при обновлениях**.
+
+Обновление — той же командой: бинарник и маршруты обновятся, конфиг останется.
+
+#### Сборка из исходников (для разработки)
+
+```bash
+# Установить Rust (если ещё нет)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
-```
 
-Проверка:
-
-```bash
-rustc --version
-cargo --version
-```
-
-#### 2. Сборка
-
-```bash
+# Склонировать и собрать
 git clone <repository-url> ssroute
 cd ssroute
 cargo build --release
+
+# Запустить локально (конфиг и data/ ищутся в текущей директории)
+cp ssroute.conf.example ssroute.conf
+# отредактировать ssroute.conf
+sudo ./target/release/ssroute
 ```
 
-Бинарник будет в `./target/release/ssroute`.
-
-#### 3. Установка в систему (опционально)
-
-```bash
-sudo make install
-```
-
-Или вручную:
-
-```bash
-sudo install -m 0755 ./target/release/ssroute /usr/bin/ssroute
-```
-
-#### 4. Установка с systemd-сервисом
+Или установить в систему:
 
 ```bash
 sudo make install-service
 ```
 
-Это установит бинарник, создаст рабочую директорию `/opt/ssroute`, скопирует пример конфига и зарегистрирует systemd-unit.
+Это установит бинарник в `/usr/bin/`, конфиг и маршруты в `/etc/ssroute/`, зарегистрирует systemd-сервис.
 
 <a id="ru-configuration"></a>
 ### Конфигурация
 
-Скопируйте пример конфигурации и отредактируйте:
+При установке через `install.sh` конфиг создаётся автоматически в `/etc/ssroute/ssroute.conf`. При разработке — скопируйте вручную:
 
 ```bash
 cp ssroute.conf.example ssroute.conf
-nano ssroute.conf
+nano ssroute.conf  # или: sudo nano /etc/ssroute/ssroute.conf
 ```
 
 Формат: `ключ=значение`, строки с `#` — комментарии, пустые строки игнорируются.
@@ -239,56 +231,28 @@ default_route/
 <a id="ru-usage"></a>
 ### Запуск
 
-Бинарник должен запускаться из директории, содержащей `ssroute.conf` и папки `data/` / `default_route/`:
+При установке через `install.sh` или `make install-service` — просто:
 
 ```bash
-cd /path/to/ssroute
-sudo ./target/release/ssroute
+sudo ssroute
 ```
 
-Или при установке в систему:
+Конфиг и маршруты ищутся автоматически: сначала в текущей директории, затем в `/etc/ssroute/`. Можно указать путь явно:
 
 ```bash
-cd /opt/ssroute
-sudo ssroute
+sudo ssroute --config /path/to/ssroute.conf
+```
+
+При разработке (из корня проекта):
+
+```bash
+sudo ./target/release/ssroute
 ```
 
 <a id="ru-systemd"></a>
 ### systemd-сервис
 
-Быстрая установка через Makefile:
-
-```bash
-sudo make install-service
-```
-
-Или вручную — создайте `/etc/systemd/system/ssroute.service`:
-
-```ini
-[Unit]
-Description=ssroute - Shadowsocks routing daemon
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/ssroute
-ExecStart=/usr/bin/ssroute
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Подготовьте рабочую директорию:
-
-```bash
-sudo mkdir -p /opt/ssroute
-sudo cp ssroute.conf /opt/ssroute/
-sudo cp -r data/ /opt/ssroute/
-sudo cp -r default_route/ /opt/ssroute/
-```
+При установке через `install.sh` или `make install-service` сервис создаётся автоматически.
 
 Включение и запуск:
 
@@ -423,58 +387,50 @@ This allows flexible traffic splitting: some IPs go through the SS tunnel, the r
 <a id="en-installation"></a>
 ### Installation
 
-#### 1. Install Rust
+#### Quick install from GitHub release
 
 ```bash
+curl -sSL https://github.com/pnv1/ssroute/releases/latest/download/install.sh | sudo bash
+```
+
+The script auto-detects architecture (x86_64/ARM), downloads the binary, installs to `/usr/bin/ssroute`, copies route data to `/etc/ssroute/`, and creates a systemd service. Config (`/etc/ssroute/ssroute.conf`) is created from template on first install only and **never overwritten on updates**.
+
+To update — run the same command: binary and routes are updated, config is preserved.
+
+#### Build from source (for development)
+
+```bash
+# Install Rust (if not already)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
-```
 
-Verify:
-
-```bash
-rustc --version
-cargo --version
-```
-
-#### 2. Build
-
-```bash
+# Clone and build
 git clone <repository-url> ssroute
 cd ssroute
 cargo build --release
+
+# Run locally (config and data/ are looked up in the current directory)
+cp ssroute.conf.example ssroute.conf
+# edit ssroute.conf
+sudo ./target/release/ssroute
 ```
 
-The compiled binary will be at `./target/release/ssroute`.
-
-#### 3. Install (optional)
-
-```bash
-sudo make install
-```
-
-Or manually:
-
-```bash
-sudo install -m 0755 ./target/release/ssroute /usr/bin/ssroute
-```
-
-#### 4. Install with systemd service
+Or install system-wide:
 
 ```bash
 sudo make install-service
 ```
 
-This installs the binary, creates the working directory `/opt/ssroute`, copies the example config, and registers the systemd unit.
+Installs binary to `/usr/bin/`, config and routes to `/etc/ssroute/`, registers systemd service.
 
 <a id="en-configuration"></a>
 ### Configuration
 
-Copy the example config and edit:
+When installed via `install.sh`, the config is created automatically at `/etc/ssroute/ssroute.conf`. For development — copy manually:
 
 ```bash
 cp ssroute.conf.example ssroute.conf
-nano ssroute.conf
+nano ssroute.conf  # or: sudo nano /etc/ssroute/ssroute.conf
 ```
 
 Format: `key=value`, lines starting with `#` are comments, blank lines are ignored.
@@ -577,56 +533,28 @@ Only files with `.json` extension are processed. Files like `example.json.notuse
 <a id="en-usage"></a>
 ### Running
 
-The binary must be run from the directory containing `ssroute.conf` and the `data/` / `default_route/` directories:
+When installed via `install.sh` or `make install-service`:
 
 ```bash
-cd /path/to/ssroute
-sudo ./target/release/ssroute
+sudo ssroute
 ```
 
-Or if installed system-wide:
+Config and routes are searched automatically: first in CWD, then in `/etc/ssroute/`. You can specify the path explicitly:
 
 ```bash
-cd /opt/ssroute
-sudo ssroute
+sudo ssroute --config /path/to/ssroute.conf
+```
+
+During development (from project root):
+
+```bash
+sudo ./target/release/ssroute
 ```
 
 <a id="en-systemd"></a>
 ### systemd Service
 
-Quick install via Makefile:
-
-```bash
-sudo make install-service
-```
-
-Or manually — create `/etc/systemd/system/ssroute.service`:
-
-```ini
-[Unit]
-Description=ssroute - Shadowsocks routing daemon
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/ssroute
-ExecStart=/usr/bin/ssroute
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Set up the working directory:
-
-```bash
-sudo mkdir -p /opt/ssroute
-sudo cp ssroute.conf /opt/ssroute/
-sudo cp -r data/ /opt/ssroute/
-sudo cp -r default_route/ /opt/ssroute/
-```
+When installed via `install.sh` or `make install-service`, the service is created automatically.
 
 Enable and start:
 

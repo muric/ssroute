@@ -8,17 +8,6 @@ use futures::TryStreamExt;
 
 use crate::stats::{classify_error_str, Stats};
 
-const MAIN_ROUTE_DIR: &str = "data";
-const DEFAULT_ROUTE_DIR: &str = "default_route";
-
-pub fn main_route_dir() -> &'static str {
-    MAIN_ROUTE_DIR
-}
-
-pub fn default_route_dir() -> &'static str {
-    DEFAULT_ROUTE_DIR
-}
-
 /// Add a single route via netlink.
 async fn add_route(
     handle: &rtnetlink::Handle,
@@ -79,16 +68,16 @@ async fn get_iface_index(handle: &rtnetlink::Handle, name: &str) -> Result<u32> 
 /// Each .json file contains a JSON array of IP/CIDR strings.
 /// Routes are added in parallel, limited by `concurrency`.
 pub async fn add_routes_from_dir(
-    dir: &str,
+    dir: &Path,
     gateway: &str,
     iface_name: &str,
     concurrency: usize,
     debug: bool,
     stats: &Arc<Stats>,
 ) -> Result<()> {
-    let dir_path = Path::new(dir);
+    let dir_path = dir;
     if !dir_path.exists() {
-        tracing::info!("Directory {dir} does not exist — skipping");
+        tracing::info!("Directory {} does not exist — skipping", dir.display());
         return Ok(());
     }
 
@@ -114,7 +103,7 @@ pub async fn add_routes_from_dir(
 
     let mut json_files: Vec<String> = Vec::new();
     let entries =
-        std::fs::read_dir(dir_path).with_context(|| format!("read directory {dir}"))?;
+        std::fs::read_dir(dir_path).with_context(|| format!("read directory {}", dir.display()))?;
 
     for entry in entries {
         let entry = entry?;
