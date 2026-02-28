@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use futures::stream::{self, StreamExt};
 use futures::TryStreamExt;
 
@@ -28,17 +28,16 @@ async fn add_route(
 ) -> Result<()> {
     let (ip, prefix_len) = parse_destination(destination)?;
 
-    let route_msg = handle
+    handle
         .route()
         .add()
         .v4()
         .destination_prefix(ip, prefix_len)
         .gateway(gateway)
-        .output_interface(iface_index);
-
-    route_msg.execute().await.with_context(|| {
-        format!("add route {destination} via {gateway} dev index {iface_index}")
-    })?;
+        .output_interface(iface_index)
+        .execute()
+        .await
+        .with_context(|| format!("add route {destination} via {gateway} dev index {iface_index}"))?;
 
     Ok(())
 }
@@ -52,6 +51,9 @@ fn parse_destination(dest: &str) -> Result<(Ipv4Addr, u8)> {
         let prefix: u8 = prefix_str
             .parse()
             .with_context(|| format!("invalid prefix in CIDR: {dest}"))?;
+        if prefix > 32 {
+            bail!("prefix length {prefix} exceeds 32 in: {dest}");
+        }
         Ok((ip, prefix))
     } else {
         let ip: Ipv4Addr = dest
@@ -90,35 +92,29 @@ pub async fn add_routes_from_dir(
         return Ok(());
     }
 
-    // Create netlink connection
-    let (connection, handle, _) = rtnetlink::new_connection()
-        .context("create netlink connection for routes")?;
+    let (connection, handle, _) =
+        rtnetlink::new_connection().context("create netlink connection for routes")?;
     tokio::spawn(connection);
 
-    // Look up interface
-    let iface_index = match get_iface_index(&handle, iface_name).await {
-        Ok(idx) => idx,
-        Err(e) => {
-            let err_str = format!("{e}");
-            if err_str.contains("not found") || err_str.contains("Link not found") {
-                tracing::error!(
-                    "Configuration error: interface '{}' does not exist. Check 'interface' or 'default_interface' in config.",
-                    iface_name
-                );
-                std::process::exit(1);
-            }
-            return Err(e);
+    let iface_index = get_iface_index(&handle, iface_name).await.map_err(|e| {
+        let err_str = format!("{e}");
+        if err_str.contains("not found") || err_str.contains("Link not found") {
+            anyhow::anyhow!(
+                "interface '{}' does not exist — check 'interface' or 'default_interface' in config",
+                iface_name
+            )
+        } else {
+            e
         }
-    };
+    })?;
 
     let gw: Ipv4Addr = gateway
         .parse()
         .with_context(|| format!("invalid gateway IP: {gateway}"))?;
 
-    // Collect .json files
     let mut json_files: Vec<String> = Vec::new();
-    let entries = std::fs::read_dir(dir_path)
-        .with_context(|| format!("read directory {dir}"))?;
+    let entries =
+        std::fs::read_dir(dir_path).with_context(|| format!("read directory {dir}"))?;
 
     for entry in entries {
         let entry = entry?;
@@ -177,10 +173,9 @@ pub async fn add_routes_from_dir(
                             }
                             "no_such_device" => {
                                 tracing::error!(
-                                    "Configuration error: interface '{}' does not exist. Check 'interface' or 'default_interface' in config.",
+                                    "interface '{}' disappeared during route loading",
                                     iface_name
                                 );
-                                std::process::exit(1);
                             }
                             _ => {
                                 stats_ref.add_error(err_type);

@@ -47,22 +47,21 @@ ssroute — демон прозрачной маршрутизации чере�
                     ┌──────────────────────────────────────────────┐
                     │              ssroute daemon                   │
                     │                                               │
-  Трафик клиентов   │  TUN-устройство ──→ Перехватчик ICMP         │
-  (ядро направляет  │       │                  │ (ответы на пинги)  │
-   в TUN)           │       ▼                  │                    │
-                    │  TCP/IP стек  ◄───────────┘                   │
-                    │  (smoltcp)                                    │
+  Трафик клиентов   │  TUN-устройство                               │
+  (ядро направляет  │       │                                       │
+   в TUN)           │       ▼                                       │
+                    │  shadowsocks-service (local-tun)              │
                     │       │                                       │
-                    │       ├── TCP ──→ SS ProxyClientStream        │
-                    │       └── UDP ──→ SS ProxySocket    ─────────────→ SS-сервер
+                    │       ├── TCP relay ──→ SS-сервер              │
+                    │       ├── UDP relay ──→ SS-сервер              │
+                    │       └── ICMP ──→ echo reply                  │
                     │                                               │
                     └──────────────────────────────────────────────┘
 ```
 
 1. Ядро Linux направляет пакеты в TUN-интерфейс на основе маршрутов из JSON-файлов
-2. ICMP echo request перехватываются и получают мгновенный локальный ответ (без проксирования)
-3. TCP/UDP пакеты обрабатываются пользовательским TCP/IP стеком (smoltcp)
-4. Трафик шифруется и пересылается через Shadowsocks-сервер
+2. `shadowsocks-service` обрабатывает TCP, UDP и ICMP пакеты
+3. Трафик шифруется и пересылается через Shadowsocks-сервер
 
 Поддерживается два набора маршрутов:
 - **`data/`** — маршруты, направляемые в TUN-интерфейс (через Shadowsocks)
@@ -214,8 +213,8 @@ obfs_mode=disable
 
 ```json
 [
-    "8.8.8.8",
-    "1.1.1.1",
+    "91.108.4.0/22",
+    "149.154.160.0/20",
     "104.18.0.0/16",
     "172.217.0.0/16"
 ]
@@ -326,10 +325,10 @@ ip route show dev eth0 | head -20
 **Тест ICMP (должен отвечать за <1мс):**
 
 ```bash
-ping -c 3 8.8.8.8
+ping -c 3 91.108.4.1
 ```
 
-Если маршрут для 8.8.8.8 проходит через TUN-интерфейс, время ответа будет <1мс — это подтверждает, что маршрут активен и перехватчик ICMP работает.
+Если маршрут для этого IP проходит через TUN-интерфейс (есть в `data/`), пинг подтвердит, что маршрут активен и трафик идёт через туннель.
 
 **Тест подключения (daemon-режим):**
 
@@ -386,22 +385,21 @@ Designed to run on a home router (or any Linux gateway) as a systemd service. Cl
                     ┌──────────────────────────────────────────────┐
                     │              ssroute daemon                   │
                     │                                               │
-  Client traffic    │  TUN device ──→ ICMP interceptor              │
-  (routed by        │       │              │ (ping replies)         │
-   kernel to TUN)   │       ▼              │                        │
-                    │  TCP/IP stack  ◄──────┘                       │
-                    │  (smoltcp)                                    │
+  Client traffic    │  TUN device                                   │
+  (routed by        │       │                                       │
+   kernel to TUN)   │       ▼                                       │
+                    │  shadowsocks-service (local-tun)              │
                     │       │                                       │
-                    │       ├── TCP ──→ SS ProxyClientStream        │
-                    │       └── UDP ──→ SS ProxySocket    ─────────────→ SS Server
+                    │       ├── TCP relay ──→ SS Server              │
+                    │       ├── UDP relay ──→ SS Server              │
+                    │       └── ICMP ──→ echo reply                  │
                     │                                               │
                     └──────────────────────────────────────────────┘
 ```
 
 1. Linux kernel routes packets to the TUN interface based on routes loaded from JSON files
-2. ICMP echo requests are intercepted and answered locally (no proxying needed)
-3. TCP/UDP packets are processed by a userspace TCP/IP stack (smoltcp)
-4. Traffic is encrypted and forwarded through the Shadowsocks server
+2. `shadowsocks-service` handles TCP, UDP, and ICMP packets
+3. Traffic is encrypted and forwarded through the Shadowsocks server
 
 Two sets of routes are supported:
 - **`data/`** — routes directed to the TUN interface (through Shadowsocks)
@@ -553,8 +551,8 @@ Each JSON file contains an array of IP addresses or CIDR ranges:
 
 ```json
 [
-    "8.8.8.8",
-    "1.1.1.1",
+    "91.108.4.0/22",
+    "149.154.160.0/20",
     "104.18.0.0/16",
     "172.217.0.0/16"
 ]
@@ -665,10 +663,10 @@ ip route show dev eth0 | head -20
 **Test ICMP (should respond in <1ms):**
 
 ```bash
-ping -c 3 8.8.8.8
+ping -c 3 91.108.4.1
 ```
 
-If the route for 8.8.8.8 goes through the TUN interface, you should see <1ms response times — this confirms the route is active and the ICMP interceptor is working.
+If the route for this IP goes through the TUN interface (listed in `data/`), the ping confirms the route is active and traffic flows through the tunnel.
 
 **Test connectivity (daemon mode):**
 

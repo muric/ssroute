@@ -16,8 +16,8 @@ pub struct Stats {
     pub no_route_to_host: AtomicI64,
     pub unknown_error: AtomicI64,
 
-    dup_sender: mpsc::Sender<String>,
-    _writer_handle: tokio::task::JoinHandle<()>,
+    dup_sender: Option<mpsc::Sender<String>>,
+    writer_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Stats {
@@ -38,8 +38,8 @@ impl Stats {
             invalid_argument: AtomicI64::new(0),
             no_route_to_host: AtomicI64::new(0),
             unknown_error: AtomicI64::new(0),
-            dup_sender: tx,
-            _writer_handle: handle,
+            dup_sender: Some(tx),
+            writer_handle: Some(handle),
         }
     }
 
@@ -49,8 +49,9 @@ impl Stats {
 
     pub fn add_already_exist(&self, route: String) {
         self.already_exist.fetch_add(1, Ordering::Relaxed);
-        // Best-effort send, don't block if channel is full
-        let _ = self.dup_sender.try_send(route);
+        if let Some(ref tx) = self.dup_sender {
+            let _ = tx.try_send(route);
+        }
     }
 
     pub fn add_error(&self, err_type: &str) {
@@ -61,6 +62,19 @@ impl Stats {
             "no_route_to_host" => self.no_route_to_host.fetch_add(1, Ordering::Relaxed),
             _ => self.unknown_error.fetch_add(1, Ordering::Relaxed),
         };
+    }
+
+    /// Close the duplicates channel and wait for the writer to flush.
+    pub async fn shutdown(&mut self) {
+        // Drop sender to signal writer to finish
+        self.dup_sender.take();
+        if let Some(handle) = self.writer_handle.take() {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                handle,
+            )
+            .await;
+        }
     }
 
     pub fn print_stats(&self) {

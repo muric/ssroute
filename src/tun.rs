@@ -3,6 +3,9 @@ use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 
 use anyhow::{bail, Context, Result};
 
+// Linux x86_64 ioctl constants for TUN devices.
+// Used only in oneshot mode (persistent TUN). In daemon mode, shadowsocks-service
+// creates the TUN device itself.
 const TUNSETIFF: u64 = 0x400454ca;
 const IFF_TUN: u16 = 0x0001;
 const IFF_NO_PI: u16 = 0x1000;

@@ -44,8 +44,20 @@ pub async fn start_plugin(
     let child = cmd.spawn().with_context(|| format!("start plugin {plugin}"))?;
     let pid = child.id().unwrap_or(0);
 
-    // Wait for the plugin to start listening
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Poll-connect until the plugin is ready (up to 5 seconds)
+    let ready = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if tokio::net::TcpStream::connect(&local_addr).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+
+    if ready.is_err() {
+        tracing::warn!("Plugin {plugin} did not become ready within 5s, continuing anyway");
+    }
 
     tracing::info!("Plugin {plugin} started (pid={pid}), listening on {local_addr}");
 

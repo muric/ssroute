@@ -45,6 +45,11 @@ async fn run_oneshot_mode(config: &config::Config) -> Result<()> {
     let stats = Arc::new(stats::Stats::new());
     add_routes(config, &stats).await;
     stats.print_stats();
+    // Ensure duplicates writer flushes before exit
+    if let Some(s) = Arc::into_inner(stats) {
+        let mut s = s;
+        s.shutdown().await;
+    }
 
     Ok(())
 }
