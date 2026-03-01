@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+if [ -d /run/systemd/system ]; then
+    case "$1" in
+        remove|purge)
+            systemctl stop ssroute || true
+            systemctl disable ssroute || true
+            ;;
+        upgrade|deconfigure)
+            systemctl stop ssroute || true
+            ;;
+        failed-upgrade|abort-install|abort-upgrade|abort-remove)
+            # Do not modify service state on aborted or failed operations
+            ;;
+        *)
+            # For any other actions, leave service state unchanged
+            ;;
+    esac
+fi

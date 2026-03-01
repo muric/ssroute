@@ -1,0 +1,33 @@
+#!/bin/sh
+set -e
+
+CONFIG_DIR="/etc/ssroute"
+CONFIG_FILE="$CONFIG_DIR/ssroute.conf"
+EXAMPLE_FILE="$CONFIG_DIR/ssroute.conf.example"
+
+mkdir -p "$CONFIG_DIR"
+
+case "$1" in
+    configure)
+        # Create default config if it does not exist
+        if [ ! -f "$CONFIG_FILE" ] && [ -f "$EXAMPLE_FILE" ]; then
+            cp "$EXAMPLE_FILE" "$CONFIG_FILE"
+        fi
+
+        # Enable and start systemd service if systemd is present
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload
+            systemctl enable --now ssroute || true
+        fi
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        # No special actions needed on abort for now.
+        ;;
+
+    *)
+        # No-op for other arguments (e.g. triggered).
+        ;;
+esac
+
+exit 0

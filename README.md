@@ -85,58 +85,73 @@ ssroute — демон прозрачной маршрутизации чере�
 <a id="ru-installation"></a>
 ### Установка
 
-#### 1. Установка Rust
+#### Установка из deb-пакетов
 
 ```bash
+ARCH=$(dpkg --print-architecture)
+wget -q "https://github.com/muric/ssroute/releases/latest/download/ssroute_${ARCH}.deb"
+wget -q "https://github.com/muric/ssroute-data/releases/latest/download/ssroute-data_all.deb"
+sudo dpkg -i ssroute-data_all.deb ssroute_${ARCH}.deb
+```
+
+При первой установке конфиг создаётся из шаблона. Сервис автоматически включается и запускается (postinst), но с шаблонным конфигом упадёт — настройте конфиг и перезапустите:
+
+```bash
+sudo vim /etc/ssroute/ssroute.conf
+sudo systemctl restart ssroute
+```
+
+#### Обновление приложения (маршруты не трогаются)
+
+```bash
+ARCH=$(dpkg --print-architecture)
+wget -q "https://github.com/muric/ssroute/releases/latest/download/ssroute_${ARCH}.deb"
+sudo dpkg -i ssroute_${ARCH}.deb
+```
+
+#### Обновление маршрутов (приложение не трогается)
+
+```bash
+wget -q "https://github.com/muric/ssroute-data/releases/latest/download/ssroute-data_all.deb"
+sudo dpkg -i ssroute-data_all.deb
+sudo systemctl restart ssroute
+```
+
+#### Удаление
+
+```bash
+sudo dpkg -r ssroute ssroute-data
+```
+
+#### Сборка из исходников (для разработки)
+
+```bash
+# Установить Rust (если ещё нет)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
-```
 
-Проверка:
-
-```bash
-rustc --version
-cargo --version
-```
-
-#### 2. Сборка
-
-```bash
-git clone <repository-url> ssroute
+# Склонировать и собрать
+git clone https://github.com/muric/ssroute.git
 cd ssroute
 cargo build --release
+
+# Собрать deb-пакет
+make deb
+
+# Или запустить локально (конфиг ищется в текущей директории)
+cp ssroute.conf.example ssroute.conf
+# отредактировать ssroute.conf
+sudo ./target/release/ssroute
 ```
-
-Бинарник будет в `./target/release/ssroute`.
-
-#### 3. Установка в систему (опционально)
-
-```bash
-sudo make install
-```
-
-Или вручную:
-
-```bash
-sudo install -m 0755 ./target/release/ssroute /usr/bin/ssroute
-```
-
-#### 4. Установка с systemd-сервисом
-
-```bash
-sudo make install-service
-```
-
-Это установит бинарник, создаст рабочую директорию `/opt/ssroute`, скопирует пример конфига и зарегистрирует systemd-unit.
 
 <a id="ru-configuration"></a>
 ### Конфигурация
 
-Скопируйте пример конфигурации и отредактируйте:
+Конфиг находится в `/etc/ssroute/ssroute.conf`. При разработке — скопируйте вручную:
 
 ```bash
 cp ssroute.conf.example ssroute.conf
-nano ssroute.conf
+nano ssroute.conf  # или: sudo nano /etc/ssroute/ssroute.conf
 ```
 
 Формат: `ключ=значение`, строки с `#` — комментарии, пустые строки игнорируются.
@@ -204,7 +219,7 @@ obfs_mode=disable
 <a id="ru-route-files"></a>
 ### Файлы маршрутов
 
-Маршруты загружаются из JSON-файлов в двух директориях:
+Маршруты поставляются пакетом [ssroute-data](https://github.com/muric/ssroute-data) и устанавливаются в `/etc/ssroute/`. Файлы загружаются из двух директорий:
 
 - **`data/`** — маршруты для TUN-интерфейса (через Shadowsocks)
 - **`default_route/`** — маршруты для интерфейса по умолчанию (минуя Shadowsocks)
@@ -220,83 +235,38 @@ obfs_mode=disable
 ]
 ```
 
-Файлы можно организовать по сервисам:
-
-```
-data/
-├── discord.json
-├── telegram.json
-├── openai.json
-├── youtube.json
-└── ...
-default_route/
-├── local_services.json
-└── ...
-```
-
 Обрабатываются только файлы с расширением `.json`. Файлы вроде `example.json.notused` будут пропущены.
 
 <a id="ru-usage"></a>
 ### Запуск
 
-Бинарник должен запускаться из директории, содержащей `ssroute.conf` и папки `data/` / `default_route/`:
-
 ```bash
-cd /path/to/ssroute
-sudo ./target/release/ssroute
+sudo ssroute
 ```
 
-Или при установке в систему:
+Конфиг ищется автоматически: сначала в текущей директории, затем в `/etc/ssroute/`. Можно указать путь явно:
 
 ```bash
-cd /opt/ssroute
-sudo ssroute
+sudo ssroute --config /path/to/ssroute.conf
+```
+
+При разработке (из корня проекта):
+
+```bash
+sudo ./target/release/ssroute
 ```
 
 <a id="ru-systemd"></a>
 ### systemd-сервис
 
-Быстрая установка через Makefile:
+Сервис автоматически включается при установке deb-пакета.
+
+Управление:
 
 ```bash
-sudo make install-service
-```
-
-Или вручную — создайте `/etc/systemd/system/ssroute.service`:
-
-```ini
-[Unit]
-Description=ssroute - Shadowsocks routing daemon
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/ssroute
-ExecStart=/usr/bin/ssroute
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Подготовьте рабочую директорию:
-
-```bash
-sudo mkdir -p /opt/ssroute
-sudo cp ssroute.conf /opt/ssroute/
-sudo cp -r data/ /opt/ssroute/
-sudo cp -r default_route/ /opt/ssroute/
-```
-
-Включение и запуск:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable ssroute
-sudo systemctl start ssroute
 sudo systemctl status ssroute
+sudo systemctl restart ssroute
+sudo systemctl stop ssroute
 ```
 
 Просмотр логов:
@@ -358,7 +328,7 @@ sudo RUST_LOG=ssroute::tunnel=debug ssroute
 Если что-то не работает:
 - Убедитесь, что TUN-интерфейс создан: `ip a`
 - Проверьте корректность `ssroute.conf` (gateway, interface, параметры SS)
-- Проверьте валидность JSON-файлов в `data/`
+- Проверьте валидность JSON-файлов в `/etc/ssroute/data/`
 - Посмотрите логи systemd: `journalctl -u ssroute`
 - Запустите вручную под sudo для вывода в консоль
 
@@ -423,58 +393,73 @@ This allows flexible traffic splitting: some IPs go through the SS tunnel, the r
 <a id="en-installation"></a>
 ### Installation
 
-#### 1. Install Rust
+#### Install from deb packages
 
 ```bash
+ARCH=$(dpkg --print-architecture)
+wget -q "https://github.com/muric/ssroute/releases/latest/download/ssroute_${ARCH}.deb"
+wget -q "https://github.com/muric/ssroute-data/releases/latest/download/ssroute-data_all.deb"
+sudo dpkg -i ssroute-data_all.deb ssroute_${ARCH}.deb
+```
+
+On first install, a config is created from a template. The service is automatically enabled and started (postinst), but will fail with the template config — edit and restart:
+
+```bash
+sudo vim /etc/ssroute/ssroute.conf
+sudo systemctl restart ssroute
+```
+
+#### Update application (routes untouched)
+
+```bash
+ARCH=$(dpkg --print-architecture)
+wget -q "https://github.com/muric/ssroute/releases/latest/download/ssroute_${ARCH}.deb"
+sudo dpkg -i ssroute_${ARCH}.deb
+```
+
+#### Update routes (application untouched)
+
+```bash
+wget -q "https://github.com/muric/ssroute-data/releases/latest/download/ssroute-data_all.deb"
+sudo dpkg -i ssroute-data_all.deb
+sudo systemctl restart ssroute
+```
+
+#### Uninstall
+
+```bash
+sudo dpkg -r ssroute ssroute-data
+```
+
+#### Build from source (for development)
+
+```bash
+# Install Rust (if not already)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
-```
 
-Verify:
-
-```bash
-rustc --version
-cargo --version
-```
-
-#### 2. Build
-
-```bash
-git clone <repository-url> ssroute
+# Clone and build
+git clone https://github.com/muric/ssroute.git
 cd ssroute
 cargo build --release
+
+# Build deb package
+make deb
+
+# Or run locally (config is looked up in the current directory)
+cp ssroute.conf.example ssroute.conf
+# edit ssroute.conf
+sudo ./target/release/ssroute
 ```
-
-The compiled binary will be at `./target/release/ssroute`.
-
-#### 3. Install (optional)
-
-```bash
-sudo make install
-```
-
-Or manually:
-
-```bash
-sudo install -m 0755 ./target/release/ssroute /usr/bin/ssroute
-```
-
-#### 4. Install with systemd service
-
-```bash
-sudo make install-service
-```
-
-This installs the binary, creates the working directory `/opt/ssroute`, copies the example config, and registers the systemd unit.
 
 <a id="en-configuration"></a>
 ### Configuration
 
-Copy the example config and edit:
+Config is located at `/etc/ssroute/ssroute.conf`. For development — copy manually:
 
 ```bash
 cp ssroute.conf.example ssroute.conf
-nano ssroute.conf
+nano ssroute.conf  # or: sudo nano /etc/ssroute/ssroute.conf
 ```
 
 Format: `key=value`, lines starting with `#` are comments, blank lines are ignored.
@@ -542,7 +527,7 @@ obfs_mode=disable
 <a id="en-route-files"></a>
 ### Route Files
 
-Routes are loaded from JSON files in two directories:
+Routes are provided by the [ssroute-data](https://github.com/muric/ssroute-data) package and installed to `/etc/ssroute/`. Files are loaded from two directories:
 
 - **`data/`** — routes directed to the TUN interface (through Shadowsocks)
 - **`default_route/`** — routes directed to the default interface (bypassing Shadowsocks)
@@ -558,83 +543,38 @@ Each JSON file contains an array of IP addresses or CIDR ranges:
 ]
 ```
 
-You can organize routes by service:
-
-```
-data/
-├── discord.json
-├── telegram.json
-├── openai.json
-├── youtube.json
-└── ...
-default_route/
-├── local_services.json
-└── ...
-```
-
 Only files with `.json` extension are processed. Files like `example.json.notused` will be skipped.
 
 <a id="en-usage"></a>
 ### Running
 
-The binary must be run from the directory containing `ssroute.conf` and the `data/` / `default_route/` directories:
-
 ```bash
-cd /path/to/ssroute
-sudo ./target/release/ssroute
+sudo ssroute
 ```
 
-Or if installed system-wide:
+Config is searched automatically: first in CWD, then in `/etc/ssroute/`. You can specify the path explicitly:
 
 ```bash
-cd /opt/ssroute
-sudo ssroute
+sudo ssroute --config /path/to/ssroute.conf
+```
+
+During development (from project root):
+
+```bash
+sudo ./target/release/ssroute
 ```
 
 <a id="en-systemd"></a>
 ### systemd Service
 
-Quick install via Makefile:
+The service is automatically enabled on deb package installation.
+
+Management:
 
 ```bash
-sudo make install-service
-```
-
-Or manually — create `/etc/systemd/system/ssroute.service`:
-
-```ini
-[Unit]
-Description=ssroute - Shadowsocks routing daemon
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/ssroute
-ExecStart=/usr/bin/ssroute
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Set up the working directory:
-
-```bash
-sudo mkdir -p /opt/ssroute
-sudo cp ssroute.conf /opt/ssroute/
-sudo cp -r data/ /opt/ssroute/
-sudo cp -r default_route/ /opt/ssroute/
-```
-
-Enable and start:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable ssroute
-sudo systemctl start ssroute
 sudo systemctl status ssroute
+sudo systemctl restart ssroute
+sudo systemctl stop ssroute
 ```
 
 View logs:
@@ -696,7 +636,7 @@ sudo RUST_LOG=ssroute::tunnel=debug ssroute
 If something is not working:
 - Verify the TUN interface is created: `ip a`
 - Check `ssroute.conf` for correctness (gateway, interface, SS parameters)
-- Validate JSON files in `data/`
+- Validate JSON files in `/etc/ssroute/data/`
 - Check systemd logs: `journalctl -u ssroute`
 - Run manually under sudo for console output
 

@@ -16,9 +16,23 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 anyhow = "1"
 ipnet = "2"
 futures = "0.3"
+zbus = "4.0"
 
 [dev-dependencies]
 tempfile = "3"
+
+[package.metadata.deb]
+maintainer = "muric"
+depends = "ssroute-data"
+recommends = "ssroute-data"
+section = "net"
+priority = "optional"
+assets = [
+    ["target/release/ssroute", "usr/bin/", "755"],
+    ["ssroute.conf.example", "etc/ssroute/ssroute.conf.example", "644"],
+    ["ssroute.service", "lib/systemd/system/ssroute.service", "644"],
+]
+maintainer-scripts = "debian/"
 
 [profile.release]
 opt-level = 3
