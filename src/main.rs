@@ -358,7 +358,7 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
     for _ in 0..20 {
         // NM takes some time to see the new kernel interface
         match nm_proxy
-            .call::<&str, zbus::zvariant::OwnedObjectPath>("GetDeviceByIpIface", &iface_name)
+            .call::<&str, zbus::zvariant::OwnedObjectPath>("GetDeviceByIpIface", iface_name)
             .await
         {
             Ok(path) => {
@@ -405,7 +405,7 @@ async fn is_nm_running(conn: &Connection) -> bool {
 
     // Ask D-Bus if the NM service name has an owner (is running)
     dbus_proxy
-        .call::<&str, bool>("NameHasOwner", &"org.freedesktop.NetworkManager")
+        .call::<(&str,), bool>("NameHasOwner", &("org.freedesktop.NetworkManager",))
         .await
         .unwrap_or(false)
 }
