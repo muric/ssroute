@@ -8,11 +8,24 @@ if [ ! -f /etc/ssroute/ssroute.conf ]; then
     cp /etc/ssroute/ssroute.conf.example /etc/ssroute/ssroute.conf
     CREATED_DEFAULT_CONF=1
 fi
-if [ -d /run/systemd/system ]; then
-    systemctl daemon-reload
-    if [ "$CREATED_DEFAULT_CONF" -eq 0 ]; then
-        systemctl enable --now ssroute || true
-    else
-        systemctl enable ssroute || true
-    fi
-fi
+
+case "$1" in
+    configure)
+        mkdir -p /etc/ssroute
+        if [ ! -f /etc/ssroute/ssroute.conf ]; then
+            cp /etc/ssroute/ssroute.conf.example /etc/ssroute/ssroute.conf
+        fi
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload
+            systemctl enable --now ssroute || true
+        fi
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        # No special actions needed on abort for now.
+        ;;
+
+    *)
+        # No-op for other arguments (e.g. triggered).
+        ;;
+esac
