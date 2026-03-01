@@ -22,7 +22,7 @@ install: build
 
 install-service: install
 	@mkdir -p $(CONFIG_DIR)
-	@test -f $(CONFIG_DIR)/ssroute.conf || cp ssroute.conf.example $(CONFIG_DIR)/ssroute.conf
+	@test -f $(CONFIG_DIR)/ssroute.conf || install -m 0600 ssroute.conf.example $(CONFIG_DIR)/ssroute.conf
 	cp ssroute.service $(SYSTEMD_DIR)/$(APP_NAME).service
 	systemctl daemon-reload
 	@echo ""
