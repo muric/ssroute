@@ -8,6 +8,9 @@ mod tunnel;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::time::sleep;
+use zbus::{Connection, Proxy};
+use std::error::Error;
 
 use anyhow::{bail, Context, Result};
 use config::ObfsMode;
@@ -133,8 +136,6 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
         bail!("Shadowsocks is enabled but ss_server, ss_server_port, or ss_password is not set");
     }
 
-    ensure_networkd_config(&config.interface);
-
     let mut config = config.clone();
     let mut plugin_process = None;
 
@@ -178,6 +179,10 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
         if let Err(e) = set_mtu(&config.interface, config.mtu).await {
             tracing::warn!("Failed to set MTU: {e}");
         }
+    }
+    
+    if let Err(e) = setup_unmanaged_interface(&config.interface).await {
+        eprintln!("NetworkManager integration error: {}", e);
     }
 
     let stats = Arc::new(stats::Stats::new());
@@ -318,4 +323,89 @@ Unmanaged=yes
         Ok(()) => tracing::info!("Created {path}"),
         Err(e) => tracing::warn!("Failed to write {path}: {e}"),
     }
+}
+
+///tell NM: "Don't touch this interface"
+async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error>> {
+    // 1. Connect to the System Bus (where system services communicate)
+    let connection = match Connection::system().await {
+        Ok(conn) => conn,
+        Err(_) => {
+            println!("System D-Bus not found. Skipping NetworkManager integration.");
+            return Ok(());
+        }
+    };
+
+    // 2. Check if NM is actually present
+    if !is_nm_running(&connection).await {
+        println!("NetworkManager is not running. Nothing to do.");
+        return Ok(());
+    }
+
+    // 3. Get the main NetworkManager object proxy
+    let nm_proxy = Proxy::new(
+        &connection,
+        "org.freedesktop.NetworkManager",
+        "/org/freedesktop/NetworkManager",
+        "org.freedesktop.NetworkManager",
+    )
+    .await?;
+
+    println!("Waiting for NetworkManager to detect {}...", iface_name);
+
+    // 4. Polling loop to find the device object path
+    let mut device_path = None;
+    for _ in 0..20 {
+        // NM takes some time to see the new kernel interface
+        match nm_proxy
+            .call::<&str, zbus::zvariant::OwnedObjectPath>("GetDeviceByIpIface", &iface_name)
+            .await
+        {
+            Ok(path) => {
+                device_path = Some(path);
+                break;
+            }
+            Err(_) => sleep(Duration::from_millis(150)).await,
+        }
+    }
+
+    let path = match device_path {
+        Some(p) => p,
+        None => {
+            return Err(format!("Timeout: NM did not recognize {} within 3s", iface_name).into());
+        }
+    };
+
+    // 5. Create a proxy for the specific Device and set Managed = false
+    let device_proxy = Proxy::new(
+        &connection,
+        "org.freedesktop.NetworkManager",
+        path,
+        "org.freedesktop.NetworkManager.Device",
+    )
+    .await?;
+
+    // This is the core command to stop NM from configuring the interface
+    device_proxy.set_property("Managed", false).await?;
+
+    println!("Interface {} is now unmanaged.", iface_name);
+    Ok(())
+}
+
+/// Checks if NM is active on the D-Bus system bus
+async fn is_nm_running(conn: &Connection) -> bool {
+    let dbus_proxy = Proxy::new(
+        conn,
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+    )
+    .await
+    .unwrap();
+
+    // Ask D-Bus if the NM service name has an owner (is running)
+    dbus_proxy
+        .call::<&str, bool>("NameHasOwner", &"org.freedesktop.NetworkManager")
+        .await
+        .unwrap_or(false)
 }
