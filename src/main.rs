@@ -327,7 +327,7 @@ Unmanaged=yes
 
 ///tell NM: "Don't touch this interface"
 async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error>> {
-    // 1. Connect to the System Bus (where system services communicate)
+    // 1. Establish connection to the system D-Bus
     let connection = match Connection::system().await {
         Ok(conn) => conn,
         Err(_) => {
@@ -336,13 +336,13 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
         }
     };
 
-    // 2. Check if NM is actually present
+    // 2. Check if NM is active to avoid "Service Not Found" errors
     if !is_nm_running(&connection).await {
         println!("NetworkManager is not running. Nothing to do.");
         return Ok(());
     }
 
-    // 3. Get the main NetworkManager object proxy
+    // 3. Create proxy for the main NM object
     let nm_proxy = Proxy::new(
         &connection,
         "org.freedesktop.NetworkManager",
@@ -353,12 +353,14 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
 
     println!("Waiting for NetworkManager to detect {}...", iface_name);
 
-    // 4. Polling loop to find the device object path
+    // 4. Polling: NM needs a moment to see the new kernel device
     let mut device_path = None;
     for _ in 0..20 {
-        // NM takes some time to see the new kernel interface
         match nm_proxy
-            .call::<&str, zbus::zvariant::OwnedObjectPath>("GetDeviceByIpIface", iface_name)
+            .call::<&str, (&str,), zbus::zvariant::OwnedObjectPath>(
+                "GetDeviceByIpIface",
+                &(iface_name,),
+            )
             .await
         {
             Ok(path) => {
@@ -369,14 +371,9 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
         }
     }
 
-    let path = match device_path {
-        Some(p) => p,
-        None => {
-            return Err(format!("Timeout: NM did not recognize {} within 3s", iface_name).into());
-        }
-    };
+    let path = device_path.ok_or(format!("Timeout: NM did not recognize {} within 3s", iface_name))?;
 
-    // 5. Create a proxy for the specific Device and set Managed = false
+    // 5. Create proxy for the specific device and set 'Managed' to false
     let device_proxy = Proxy::new(
         &connection,
         "org.freedesktop.NetworkManager",
@@ -385,27 +382,32 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
     )
     .await?;
 
-    // This is the core command to stop NM from configuring the interface
+    // Note: set_property handles the type wrapping automatically
     device_proxy.set_property("Managed", false).await?;
 
-    println!("Interface {} is now unmanaged.", iface_name);
+    println!("Interface {} is now UNMANAGED by NetworkManager.", iface_name);
     Ok(())
 }
 
 /// Checks if NM is active on the D-Bus system bus
 async fn is_nm_running(conn: &Connection) -> bool {
-    let dbus_proxy = Proxy::new(
+    let dbus_proxy = match Proxy::new(
         conn,
         "org.freedesktop.DBus",
         "/org/freedesktop/DBus",
         "org.freedesktop.DBus",
     )
-    .await
-    .unwrap();
+    .await {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
 
-    // Ask D-Bus if the NM service name has an owner (is running)
+    // zbus 4.x call syntax: <MethodName, BodyTuple, ReturnType>
     dbus_proxy
-        .call::<(&str,), bool>("NameHasOwner", &("org.freedesktop.NetworkManager",))
+        .call::<&str, (&str,), bool>(
+            "NameHasOwner",
+            &("org.freedesktop.NetworkManager",),
+        )
         .await
         .unwrap_or(false)
 }
