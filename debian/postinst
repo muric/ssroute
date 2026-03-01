@@ -2,11 +2,17 @@
 set -e
 mkdir -p /etc/ssroute
 if [ ! -f /etc/ssroute/ssroute.conf ]; then
+CREATED_DEFAULT_CONF=0
+mkdir -p /etc/ssroute
+if [ ! -f /etc/ssroute/ssroute.conf ]; then
     cp /etc/ssroute/ssroute.conf.example /etc/ssroute/ssroute.conf
-    chown root:root /etc/ssroute/ssroute.conf
-    chmod 0640 /etc/ssroute/ssroute.conf
+    CREATED_DEFAULT_CONF=1
 fi
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload
-    systemctl enable --now ssroute || true
+    if [ "$CREATED_DEFAULT_CONF" -eq 0 ]; then
+        systemctl enable --now ssroute || true
+    else
+        systemctl enable ssroute || true
+    fi
 fi
