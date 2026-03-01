@@ -174,6 +174,10 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
 
     tracing::info!("Waiting for TUN interface '{}' to come up...", config.interface);
     wait_for_interface(&config.interface).await;
+    
+    if let Err(e) = setup_unmanaged_interface(&config.interface).await {
+        eprintln!("NetworkManager integration error: {}", e);
+    }
 
     if config.mtu > 0 {
         if let Err(e) = set_mtu(&config.interface, config.mtu).await {
@@ -181,10 +185,6 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
         }
     }
     
-    if let Err(e) = setup_unmanaged_interface(&config.interface).await {
-        eprintln!("NetworkManager integration error: {}", e);
-    }
-
     let stats = Arc::new(stats::Stats::new());
     add_routes(&config, config_dir, &stats).await;
     stats.print_stats();
