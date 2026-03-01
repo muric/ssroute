@@ -1,4 +1,6 @@
 #!/bin/sh
 set -e
-systemctl stop ssroute || true
-systemctl disable ssroute || true
+if [ -d /run/systemd/system ]; then
+    systemctl stop ssroute || true
+    systemctl disable ssroute || true
+fi

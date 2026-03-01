@@ -1,7 +1,7 @@
 APP_NAME := ssroute
 INSTALL_DIR := /usr/bin
 CONFIG_DIR := /etc/ssroute
-SYSTEMD_DIR := /etc/systemd/system
+SYSTEMD_DIR := /lib/systemd/system
 
 .PHONY: all build clean install install-service uninstall deb
 

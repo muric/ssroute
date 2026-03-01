@@ -290,6 +290,9 @@ async fn set_mtu(name: &str, mtu: u16) -> Result<()> {
 
 /// Create systemd-networkd config so networkd does not interfere with the TUN interface.
 fn ensure_networkd_config(interface: &str) {
+    if interface.is_empty() {
+        return;
+    }
     let path = format!("{NETWORKD_DIR}/99-ssroute.network");
     let content = format!(
         "\

@@ -29,9 +29,8 @@ priority = "optional"
 assets = [
     ["target/release/ssroute", "usr/bin/", "755"],
     ["ssroute.conf.example", "etc/ssroute/ssroute.conf.example", "644"],
-    ["ssroute.service", "etc/systemd/system/ssroute.service", "644"],
+    ["ssroute.service", "lib/systemd/system/ssroute.service", "644"],
 ]
-conf-files = ["/etc/ssroute/ssroute.conf"]
 maintainer-scripts = "debian/"
 
 [profile.release]
