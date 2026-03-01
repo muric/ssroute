@@ -20,6 +20,20 @@ futures = "0.3"
 [dev-dependencies]
 tempfile = "3"
 
+[package.metadata.deb]
+maintainer = "muric"
+depends = "ssroute-data"
+recommends = "ssroute-data"
+section = "net"
+priority = "optional"
+assets = [
+    ["target/release/ssroute", "usr/bin/", "755"],
+    ["ssroute.conf.example", "etc/ssroute/ssroute.conf.example", "644"],
+    ["ssroute.service", "etc/systemd/system/ssroute.service", "644"],
+]
+conf-files = ["/etc/ssroute/ssroute.conf"]
+maintainer-scripts = "debian/"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

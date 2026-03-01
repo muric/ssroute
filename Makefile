@@ -3,7 +3,7 @@ INSTALL_DIR := /usr/bin
 CONFIG_DIR := /etc/ssroute
 SYSTEMD_DIR := /etc/systemd/system
 
-.PHONY: all build clean install install-service uninstall
+.PHONY: all build clean install install-service uninstall deb
 
 all: build
 
@@ -13,6 +13,9 @@ build:
 clean:
 	cargo clean
 
+deb: build
+	cargo deb --no-build
+
 install: build
 	install -m 0755 ./target/release/$(APP_NAME) $(INSTALL_DIR)/$(APP_NAME)
 	@echo "Installed $(APP_NAME) to $(INSTALL_DIR)/$(APP_NAME)"
@@ -20,19 +23,16 @@ install: build
 install-service: install
 	@mkdir -p $(CONFIG_DIR)
 	@test -f $(CONFIG_DIR)/ssroute.conf || cp ssroute.conf.example $(CONFIG_DIR)/ssroute.conf
-	cp -r data $(CONFIG_DIR)/
-	cp -r default_route $(CONFIG_DIR)/
 	cp ssroute.service $(SYSTEMD_DIR)/$(APP_NAME).service
 	systemctl daemon-reload
 	@echo ""
 	@echo "Installed. Files:"
 	@echo "  Binary:  $(INSTALL_DIR)/$(APP_NAME)"
 	@echo "  Config:  $(CONFIG_DIR)/ssroute.conf"
-	@echo "  Routes:  $(CONFIG_DIR)/data/, $(CONFIG_DIR)/default_route/"
 	@echo "  Service: $(SYSTEMD_DIR)/$(APP_NAME).service"
 	@echo ""
-	@echo "Edit $(CONFIG_DIR)/ssroute.conf then run:"
-	@echo "  sudo systemctl enable --now $(APP_NAME)"
+	@echo "Install route data: sudo dpkg -i ssroute-data_all.deb"
+	@echo "Then: sudo systemctl enable --now $(APP_NAME)"
 
 uninstall:
 	-systemctl stop $(APP_NAME) 2>/dev/null

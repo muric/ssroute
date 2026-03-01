@@ -14,8 +14,10 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
+            arch: amd64
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
+            arch: arm64
             os: ubuntu-latest
 
     runs-on: ${{ matrix.os }}
@@ -28,30 +30,32 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross
-        uses: taiki-e/install-action@cross
+      - name: Install cross and cargo-deb
+        run: |
+          cargo install cross --locked
+          cargo install cargo-deb --locked
 
-      - name: Build
+      - name: Build with cross
         run: cross build --release --target ${{ matrix.target }}
 
-      - name: Package release
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build deb package
+        run: cargo deb --no-build --target ${{ matrix.target }}
+
+      - name: Rename deb for release
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          DIR="ssroute-${TAG}-${{ matrix.target }}"
-          mkdir -p "$DIR"
-          cp target/${{ matrix.target }}/release/ssroute "$DIR/"
-          cp ssroute.conf.example "$DIR/"
-          cp ssroute.service "$DIR/"
-          cp -r data "$DIR/"
-          cp -r default_route "$DIR/"
-          tar czf "${DIR}.tar.gz" "$DIR"
-          echo "TARBALL=${DIR}.tar.gz" >> "$GITHUB_ENV"
+          DEB=$(find target/${{ matrix.target }}/debian -name '*.deb' | head -1)
+          cp "$DEB" "ssroute_${{ matrix.arch }}.deb"
+          cp "$DEB" "ssroute_${{ steps.version.outputs.version }}_${{ matrix.arch }}.deb"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ssroute-${{ matrix.target }}
-          path: ${{ env.TARBALL }}
+          name: ssroute-${{ matrix.arch }}
+          path: ssroute_*.deb
 
   release:
     needs: build
@@ -68,7 +72,5 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            ssroute-*.tar.gz
-            install.sh
+          files: ssroute_*.deb
           generate_release_notes: true

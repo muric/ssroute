@@ -14,6 +14,7 @@ use config::ObfsMode;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_CONFIG_PATHS: &[&str] = &["ssroute.conf", "/etc/ssroute/ssroute.conf"];
+const NETWORKD_DIR: &str = "/etc/systemd/network";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -108,6 +109,8 @@ fn find_config(explicit: &Option<PathBuf>) -> Result<PathBuf> {
 
 /// Oneshot mode: create persistent TUN, add routes, exit.
 async fn run_oneshot_mode(config: &config::Config, config_dir: &Path) -> Result<()> {
+    ensure_networkd_config(&config.interface);
+
     tracing::info!("Creating persistent TUN interface");
     tun::create_tun(&config.interface, true)?;
 
@@ -129,6 +132,8 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
     if config.ss_server.is_empty() || config.ss_server_port == 0 || config.ss_password.is_empty() {
         bail!("Shadowsocks is enabled but ss_server, ss_server_port, or ss_password is not set");
     }
+
+    ensure_networkd_config(&config.interface);
 
     let mut config = config.clone();
     let mut plugin_process = None;
@@ -281,4 +286,33 @@ async fn set_mtu(name: &str, mtu: u16) -> Result<()> {
 
     conn_handle.abort();
     Ok(())
+}
+
+/// Create systemd-networkd config so networkd does not interfere with the TUN interface.
+fn ensure_networkd_config(interface: &str) {
+    let path = format!("{NETWORKD_DIR}/99-ssroute.network");
+    let content = format!(
+        "\
+[Match]
+Name={interface}
+
+[Network]
+KeepConfiguration=yes
+IgnoreCarrierLoss=yes
+
+[Link]
+Unmanaged=yes
+"
+    );
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(&content) {
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(NETWORKD_DIR) {
+        tracing::warn!("Failed to create {NETWORKD_DIR}: {e}");
+        return;
+    }
+    match std::fs::write(&path, &content) {
+        Ok(()) => tracing::info!("Created {path}"),
+        Err(e) => tracing::warn!("Failed to write {path}: {e}"),
+    }
 }

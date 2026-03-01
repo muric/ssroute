@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+mkdir -p /etc/ssroute
+if [ ! -f /etc/ssroute/ssroute.conf ]; then
+    cp /etc/ssroute/ssroute.conf.example /etc/ssroute/ssroute.conf
+fi
+systemctl daemon-reload
+systemctl enable --now ssroute || true
