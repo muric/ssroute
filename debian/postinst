@@ -3,6 +3,8 @@ set -e
 mkdir -p /etc/ssroute
 if [ ! -f /etc/ssroute/ssroute.conf ]; then
     cp /etc/ssroute/ssroute.conf.example /etc/ssroute/ssroute.conf
+    chown root:root /etc/ssroute/ssroute.conf
+    chmod 0640 /etc/ssroute/ssroute.conf
 fi
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload
