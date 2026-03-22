@@ -49,8 +49,9 @@ pub fn build_ss_config(config: &Config) -> Result<SsConfig> {
         .local
         .push(LocalInstanceConfig::with_local_config(local));
 
-    // UDP settings
+    // UDP settings: bound associations to prevent unbounded memory growth
     ss_config.udp_timeout = Some(Duration::from_secs(120));
+    ss_config.udp_max_associations = Some(1024);
 
     Ok(ss_config)
 }

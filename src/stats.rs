@@ -6,6 +6,10 @@ use tokio::sync::mpsc;
 const DUPLICATES_FLUSH_THRESHOLD: usize = 10_000;
 const DUPLICATES_CHAN_BUFFER: usize = 50_000;
 const DUPLICATES_FILE_PREFIX: &str = "/tmp/route_duplicates_";
+/// Flush the buffer at least once every this many seconds, even if the
+/// threshold has not been reached yet. This prevents duplicate-route strings
+/// from accumulating in the in-process buffer indefinitely.
+const DUPLICATES_FLUSH_INTERVAL_SECS: u64 = 60;
 
 pub struct Stats {
     pub success: AtomicI64,
@@ -140,15 +144,29 @@ pub fn classify_error_str(err: &str) -> &'static str {
 async fn duplicates_writer(mut rx: mpsc::Receiver<String>, filename: String) {
     let mut buffer: Vec<String> = Vec::with_capacity(DUPLICATES_FLUSH_THRESHOLD);
     let mut file: Option<tokio::fs::File> = None;
+    let flush_interval = std::time::Duration::from_secs(DUPLICATES_FLUSH_INTERVAL_SECS);
 
-    while let Some(route) = rx.recv().await {
-        buffer.push(route);
-        if buffer.len() >= DUPLICATES_FLUSH_THRESHOLD {
-            flush_buffer(&mut buffer, &mut file, &filename).await;
+    loop {
+        // Wait for a message or a flush-interval timeout
+        match tokio::time::timeout(flush_interval, rx.recv()).await {
+            Ok(Some(route)) => {
+                buffer.push(route);
+                if buffer.len() >= DUPLICATES_FLUSH_THRESHOLD {
+                    flush_buffer(&mut buffer, &mut file, &filename).await;
+                }
+            }
+            Ok(None) => {
+                // Channel closed (sender dropped) – flush remaining and exit.
+                break;
+            }
+            Err(_elapsed) => {
+                // Periodic flush so buffered strings don't accumulate in memory.
+                flush_buffer(&mut buffer, &mut file, &filename).await;
+            }
         }
     }
 
-    // Final flush
+    // Final flush on shutdown
     flush_buffer(&mut buffer, &mut file, &filename).await;
 
     if let Some(mut f) = file {
@@ -189,6 +207,8 @@ async fn flush_buffer(
     }
 
     buffer.clear();
+    // Release the backing allocation so flushed strings don't keep memory pinned.
+    buffer.shrink_to_fit();
 }
 
 /// Simple timestamp without chrono dependency.
@@ -198,4 +218,54 @@ fn chrono_like_now() -> String {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     format!("{}", dur.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_stats_counters() {
+        let mut stats = Stats::new();
+        stats.add_success();
+        stats.add_success();
+        stats.add_already_exist("10.0.0.1/32 via 10.8.0.1 dev tun0".to_string());
+        stats.add_error("network_unreachable");
+        stats.add_error("invalid_argument");
+        stats.add_error("unknown_kind");
+
+        assert_eq!(stats.success.load(Ordering::Relaxed), 2);
+        assert_eq!(stats.already_exist.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.network_unreachable.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.invalid_argument.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.unknown_error.load(Ordering::Relaxed), 1);
+
+        stats.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_flushes_duplicates() {
+        // Create Stats, send a few duplicates below the flush threshold,
+        // then shut down and verify the writer task terminates cleanly.
+        let mut stats = Stats::new();
+        for i in 0..5 {
+            stats.add_already_exist(format!("192.168.{i}.0/24 via 10.8.0.1 dev tun0"));
+        }
+        // shutdown() must complete (writer task exits) within its 5-second timeout.
+        stats.shutdown().await;
+        // After shutdown the handle should be gone.
+        assert!(stats.writer_handle.is_none());
+        assert!(stats.dup_sender.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_classify_error_str() {
+        assert_eq!(classify_error_str("File exists (os error 17)"), "file_exists");
+        assert_eq!(classify_error_str("Network is unreachable"), "network_unreachable");
+        assert_eq!(classify_error_str("No such device"), "no_such_device");
+        assert_eq!(classify_error_str("Operation not permitted"), "operation_not_permitted");
+        assert_eq!(classify_error_str("Invalid argument"), "invalid_argument");
+        assert_eq!(classify_error_str("No route to host"), "no_route_to_host");
+        assert_eq!(classify_error_str("some totally unknown error"), "unknown");
+    }
 }
