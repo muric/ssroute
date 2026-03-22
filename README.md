@@ -89,8 +89,8 @@ ssroute — демон прозрачной маршрутизации чере�
 
 ```bash
 ARCH=$(dpkg --print-architecture)
-wget -q "https://github.com/muric/ssroute/releases/latest/download/ssroute_${ARCH}.deb"
-wget -q "https://github.com/muric/ssroute-data/releases/latest/download/ssroute-data_all.deb"
+wget -q -O ssroute_${ARCH}.deb "https://github.com/muric/ssroute/releases/latest/download/ssroute_${ARCH}.deb"
+wget -q -O ssroute-data_all.deb "https://github.com/muric/ssroute-data/releases/latest/download/ssroute-data_all.deb"
 sudo dpkg -i ssroute-data_all.deb ssroute_${ARCH}.deb
 ```
 
