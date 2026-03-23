@@ -126,6 +126,8 @@ pub async fn add_routes_from_dir(
         tracing::info!("Processing: {file_name}");
 
         let file_path = dir_path.join(file_name);
+        // The raw JSON string (`data`) is freed at the end of this block,
+        // before concurrent route processing begins.
         let destinations: Vec<String> = {
             let data = match std::fs::read_to_string(&file_path) {
                 Ok(d) => d,
@@ -141,7 +143,6 @@ pub async fn add_routes_from_dir(
                     continue;
                 }
             }
-            // `data` is dropped here, freeing the raw JSON string from memory
         };
 
         let handle_ref = &handle;

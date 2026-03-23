@@ -190,10 +190,17 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
     stats.print_stats();
     // Shut down stats promptly: routes are added only at startup, no need to
     // hold the writer task and channel buffer alive for the daemon lifetime.
-    // `add_routes` borrows the Arc by reference and never clones it, so
-    // Arc::into_inner always succeeds here (strong count == 1).
-    if let Some(mut s) = Arc::into_inner(stats) {
-        s.shutdown().await;
+    match Arc::try_unwrap(stats) {
+        Ok(mut s) => {
+            s.shutdown().await;
+        }
+        Err(arc) => {
+            tracing::warn!(
+                "Stats Arc still has {} strong references; \
+                 writer task/channel will remain running until process exit",
+                Arc::strong_count(&arc)
+            );
+        }
     }
 
     tracing::info!("Daemon running!!!");
