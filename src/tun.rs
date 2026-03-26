@@ -70,8 +70,7 @@ pub fn create_tun(name: &str, persistent: bool) -> Result<Option<OwnedFd>> {
     Ok(Some(owned))
 }
 
-
-/// Configure TUN interface: assign IP address (gateway/24), set MTU, bring up.
+/// Configure TUN interface: assign IP address (gateway/24 or gateway/64), set MTU, bring up.
 pub async fn configure_tun(name: &str, gateway: &str, mtu: u16) -> Result<()> {
     let (connection, handle, _) = rtnetlink::new_connection()
         .context("create netlink connection")?;
@@ -87,15 +86,16 @@ pub async fn configure_tun(name: &str, gateway: &str, mtu: u16) -> Result<()> {
         .with_context(|| format!("interface not found: {name}"))?;
     let index = link.header.index;
 
-    // Parse gateway as IPv4
-    let addr: std::net::Ipv4Addr = gateway
+    // Parse gateway as IPv4 or IPv6
+    let addr: std::net::IpAddr = gateway
         .parse()
         .with_context(|| format!("invalid gateway IP: {gateway}"))?;
 
-    // Add address (gateway/24)
+    // Add address (gateway/24 or gateway/64)
+    let prefix_len = if addr.is_ipv4() { 24 } else { 64 };
     let result = handle
         .address()
-        .add(index, std::net::IpAddr::V4(addr), 24)
+        .add(index, addr, prefix_len)
         .execute()
         .await;
 

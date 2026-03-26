@@ -38,7 +38,7 @@ pub fn build_ss_config(config: &Config) -> Result<SsConfig> {
     local.tun_interface_name = Some(config.interface.clone());
 
     // Parse address as IpNet
-    let addr_cidr = format!("{}/24", config.gateway);
+    let addr_cidr = format!("{}/{}", config.gateway, if config.gateway.contains(':') { 64 } else { 24 });
     local.tun_interface_address = Some(
         addr_cidr
             .parse()

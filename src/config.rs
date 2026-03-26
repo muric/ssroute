@@ -228,4 +228,11 @@ mod tests {
         assert_eq!(config.gateway, ""); // default empty
         assert_eq!(config.interface, "tun0");
     }
+
+    #[test]
+    fn test_ipv6_gateway() {
+        let f = write_temp_config("gateway=2001:db8::1\ninterface=tun2\n");
+        let config = read_config(f.path()).unwrap();
+        assert_eq!(config.gateway, "2001:db8::1");
+    }
 }
