@@ -1,10 +1,10 @@
 # Gateway IP address for TUN interface (assigned to the tunnel)
-# Examples: 10.0.0.1, 2001:db8::1
+# Examples: 10.0.0.1
 gateway=10.0.0.1
 
 # IPv6 Gateway IP address for TUN interface (assigned to the tunnel)
 # Examples: 2001:db8::1
-gateway6=
+gateway6=2001:db8::1
 
 # TUN interface name
 # Example: tun0, tun2
