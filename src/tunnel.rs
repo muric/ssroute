@@ -68,11 +68,7 @@ pub fn build_ss_config(config: &Config) -> Result<SsConfig> {
 
 /// Start the shadowsocks local TUN service.
 pub async fn run_service(ss_config: SsConfig) -> Result<()> {
-    match shadowsocks_service::local::run(ss_config).await {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let err_msg = format!("{:#}", e);
-            Err(anyhow::anyhow!("shadowsocks local service failed: {err_msg}"))
-        }
-    }
+    shadowsocks_service::local::run(ss_config)
+        .await
+        .context("shadowsocks local service failed")
 }
