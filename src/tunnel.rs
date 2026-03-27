@@ -37,17 +37,23 @@ pub fn build_ss_config(config: &Config) -> Result<SsConfig> {
     local.mode = Mode::TcpAndUdp;
     local.tun_interface_name = Some(config.interface.clone());
 
-    // Parse address as IpNet (prefer IPv6 gateway6 if present, else gateway)
-    let addr = if !config.gateway6.is_empty() {
+    // Use gateway as primary TUN address (IPv4), fall back to gateway6 (IPv6) if gateway not set
+    let addr = if !config.gateway.is_empty() {
+        config.gateway.clone()
+    } else if !config.gateway6.is_empty() {
         config.gateway6.clone()
     } else {
-        config.gateway.clone()
+        return Err(anyhow::anyhow!(
+            "Neither 'gateway' (IPv4) nor 'gateway6' (IPv6) is configured. \
+             Please set at least one gateway in ssroute.conf"
+        ));
     };
+    
     let addr_cidr = format!("{}/{}", addr, if addr.contains(':') { 64 } else { 24 });
     local.tun_interface_address = Some(
         addr_cidr
             .parse()
-            .map_err(|e| anyhow::anyhow!("invalid TUN address '{addr_cidr}': {e}"))?,
+            .context(format!("invalid TUN address '{addr_cidr}'. Please verify the gateway or gateway6 value in ssroute.conf"))?,
     );
 
     ss_config
@@ -62,8 +68,11 @@ pub fn build_ss_config(config: &Config) -> Result<SsConfig> {
 
 /// Start the shadowsocks local TUN service.
 pub async fn run_service(ss_config: SsConfig) -> Result<()> {
-    shadowsocks_service::local::run(ss_config)
-        .await
-        .context("shadowsocks local service")?;
-    Ok(())
+    match shadowsocks_service::local::run(ss_config).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let err_msg = format!("{:#}", e);
+            Err(anyhow::anyhow!("shadowsocks local service failed: {err_msg}"))
+        }
+    }
 }
