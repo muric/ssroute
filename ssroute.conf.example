@@ -22,7 +22,7 @@ debug=false
 
 # Default gateway IP (for routes in default_route/ directory).
 # Typically your main router IP.
-# Examples: 192.168.1.1, 2001:db8::1
+# Examples: 192.168.1.1
 default_gw=192.168.1.1
 
 # Default network interface (for routes in default_route/ directory)
