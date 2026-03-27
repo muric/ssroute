@@ -234,9 +234,10 @@ mod tests {
 
     #[test]
     fn test_ipv6_gateway() {
-        let f = write_temp_config("gateway=2001:db8::1\ninterface=tun2\n");
+        let f = write_temp_config("gateway=10.0.0.1\ngateway6=2001:db8::1\ninterface=tun2\n");
         let config = read_config(f.path()).unwrap();
-        assert_eq!(config.gateway, "2001:db8::1");
+        assert_eq!(config.gateway, "10.0.0.1");
+        assert_eq!(config.gateway6, "2001:db8::1");
     }
 
     #[test]
