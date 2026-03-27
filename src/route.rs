@@ -130,7 +130,7 @@ async fn add_route(
 }
 
 /// Check if error is "file already exists" (os error 17)
-fn is_file_exists(e: &anyhow::Error) -> bool {
+fn is_file_exists<E: std::fmt::Display>(e: &E) -> bool {
     let s = format!("{}", e).to_lowercase();
     s.contains("file exists") || s.contains("error 17")
 }
