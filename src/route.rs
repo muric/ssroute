@@ -262,19 +262,22 @@ pub async fn add_routes_from_dir(
         tracing::info!("Processing: {file_name}");
 
         let file_path = dir_path.join(file_name);
-        let data = match std::fs::read_to_string(&file_path) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::error!("Error reading file {file_name}: {e}");
-                continue;
-            }
-        };
-
-        let destinations: Vec<String> = match serde_json::from_str(&data) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::error!("Error parsing JSON {file_name}: {e}");
-                continue;
+        // The raw JSON string (`data`) is freed at the end of this block,
+        // before concurrent route processing begins.
+        let destinations: Vec<String> = {
+            let data = match std::fs::read_to_string(&file_path) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!("Error reading file {file_name}: {e}");
+                    continue;
+                }
+            };
+            match serde_json::from_str(&data) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!("Error parsing JSON {file_name}: {e}");
+                    continue;
+                }
             }
         };
 
