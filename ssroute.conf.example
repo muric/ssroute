@@ -1,6 +1,10 @@
 # Gateway IP address for TUN interface (assigned to the tunnel)
-# Example: 10.0.0.1
+# Examples: 10.0.0.1
 gateway=10.0.0.1
+
+# IPv6 Gateway IP address for TUN interface (assigned to the tunnel)
+# Examples: 2001:db8::1
+gateway6=2001:db8::1
 
 # TUN interface name
 # Example: tun0, tun2
@@ -18,7 +22,7 @@ debug=false
 
 # Default gateway IP (for routes in default_route/ directory).
 # Typically your main router IP.
-# Example: 192.168.1.1
+# Examples: 192.168.1.1
 default_gw=192.168.1.1
 
 # Default network interface (for routes in default_route/ directory)

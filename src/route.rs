@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -9,46 +9,171 @@ use futures::TryStreamExt;
 use crate::stats::{classify_error_str, Stats};
 
 /// Add a single route via netlink.
+/// Returns Ok(()) if route added or already exists, Err only for real errors.
 async fn add_route(
     handle: &rtnetlink::Handle,
     destination: &str,
-    gateway: Ipv4Addr,
+    gateway: Option<IpAddr>,
     iface_index: u32,
 ) -> Result<()> {
     let (ip, prefix_len) = parse_destination(destination)?;
 
-    handle
-        .route()
-        .add()
-        .v4()
-        .destination_prefix(ip, prefix_len)
-        .gateway(gateway)
-        .output_interface(iface_index)
-        .execute()
-        .await
-        .with_context(|| format!("add route {destination} via {gateway} dev index {iface_index}"))?;
+    match ip {
+        IpAddr::V4(dest_ip) => {
+            let mut builder = handle
+                .route()
+                .add()
+                .v4()
+                .destination_prefix(dest_ip, prefix_len)
+                .output_interface(iface_index);
 
-    Ok(())
+            if let Some(IpAddr::V4(gw_ip)) = gateway {
+                builder = builder.gateway(gw_ip);
+            }
+
+            match builder.execute().await {
+                Ok(()) => Ok(()),
+                Err(e) if is_file_exists(&e) => {
+                    // Route already exists - not an error
+                    tracing::debug!("Route {destination} already exists, skipping");
+                    Ok(())
+                }
+                Err(e) if gateway.is_some() => {
+                    // If adding route with gateway fails, try without gateway (interface-only)
+                    tracing::debug!("Route with gateway failed ({e}), trying without gateway");
+                    match handle
+                        .route()
+                        .add()
+                        .v4()
+                        .destination_prefix(dest_ip, prefix_len)
+                        .output_interface(iface_index)
+                        .execute()
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::debug!("Successfully added IPv4 route {destination} on interface (no gateway)");
+                            Ok(())
+                        }
+                        Err(e) if is_file_exists(&e) => {
+                            tracing::debug!("Route {destination} already exists (interface-only), skipping");
+                            Ok(())
+                        }
+                        Err(e) => Err(e).with_context(|| format!(
+                            "netlink add_route (fallback): destination={destination}, iface_index={iface_index}"
+                        )),
+                    }
+                }
+                Err(e) => Err(e).with_context(|| format!(
+                    "netlink add_route: destination={destination}, gateway={:?}, iface_index={iface_index}",
+                    gateway
+                )),
+            }
+        }
+        IpAddr::V6(dest_ip) => {
+            let mut builder = handle
+                .route()
+                .add()
+                .v6()
+                .destination_prefix(dest_ip, prefix_len)
+                .output_interface(iface_index);
+
+            if let Some(IpAddr::V6(gw_ip)) = gateway {
+                builder = builder.gateway(gw_ip);
+            }
+
+            match builder.execute().await {
+                Ok(()) => Ok(()),
+                Err(e) if is_file_exists(&e) => {
+                    tracing::debug!("Route {destination} already exists, skipping");
+                    Ok(())
+                }
+                Err(e) if gateway.is_some() => {
+                    // If adding route with gateway fails, try without gateway (interface-only)
+                    tracing::debug!("Route with gateway failed ({e}), trying without gateway");
+                    match handle
+                        .route()
+                        .add()
+                        .v6()
+                        .destination_prefix(dest_ip, prefix_len)
+                        .output_interface(iface_index)
+                        .execute()
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::debug!("Successfully added IPv6 route {destination} on interface (no gateway)");
+                            Ok(())
+                        }
+                        Err(e) if is_file_exists(&e) => {
+                            tracing::debug!("Route {destination} already exists (interface-only), skipping");
+                            Ok(())
+                        }
+                        Err(e) => Err(e).with_context(|| format!(
+                            "netlink add_route (fallback): destination={destination}, iface_index={iface_index}"
+                        )),
+                    }
+                }
+                Err(e) => Err(e).with_context(|| format!(
+                    "netlink add_route: destination={destination}, gateway={:?}, iface_index={iface_index}",
+                    gateway
+                )),
+            }
+        }
+    }
 }
 
-/// Parse a destination string as either a CIDR or a bare IP (treated as /32).
-fn parse_destination(dest: &str) -> Result<(Ipv4Addr, u8)> {
+/// Check if error is "file already exists" (os error 17 / EEXIST).
+///
+/// Prefer structured inspection of the error chain (io::ErrorKind, raw_os_error)
+/// and only fall back to substring checks on the formatted message.
+fn is_file_exists<E>(e: &E) -> bool
+where
+    E: std::error::Error + 'static,
+{
+    // Numeric code for EEXIST on Unix-like systems.
+    const EEXIST: i32 = 17;
+
+    // Walk the error chain looking for an underlying io::Error with
+    // Either ErrorKind::AlreadyExists or the EEXIST raw OS code.
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = current {
+        if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+            if io_err.kind() == std::io::ErrorKind::AlreadyExists {
+                return true;
+            }
+            if io_err.raw_os_error() == Some(EEXIST) {
+                return true;
+            }
+        }
+        current = err.source();
+    }
+
+    // Fallback: match common substrings in the formatted message.
+    // This keeps compatibility with environments where only the textual
+    // representation is available.
+    let s = e.to_string().to_lowercase();
+    s.contains("file exists") || s.contains("eexist") || s.contains("error 17")
+}
+
+/// Parse a destination string as either a CIDR or a bare IP (treated as /32 for IPv4 or /128 for IPv6).
+fn parse_destination(dest: &str) -> Result<(IpAddr, u8)> {
     if let Some((ip_str, prefix_str)) = dest.split_once('/') {
-        let ip: Ipv4Addr = ip_str
+        let ip: IpAddr = ip_str
             .parse()
             .with_context(|| format!("invalid IP in CIDR: {dest}"))?;
         let prefix: u8 = prefix_str
             .parse()
             .with_context(|| format!("invalid prefix in CIDR: {dest}"))?;
-        if prefix > 32 {
-            bail!("prefix length {prefix} exceeds 32 in: {dest}");
+        let max_prefix = if ip.is_ipv4() { 32 } else { 128 };
+        if prefix > max_prefix {
+            bail!("prefix length {prefix} exceeds {max_prefix} in: {dest}");
         }
         Ok((ip, prefix))
     } else {
-        let ip: Ipv4Addr = dest
+        let ip: IpAddr = dest
             .parse()
             .with_context(|| format!("invalid IP address: {dest}"))?;
-        Ok((ip, 32))
+        let default_prefix = if ip.is_ipv4() { 32 } else { 128 };
+        Ok((ip, default_prefix))
     }
 }
 
@@ -70,6 +195,7 @@ async fn get_iface_index(handle: &rtnetlink::Handle, name: &str) -> Result<u32> 
 pub async fn add_routes_from_dir(
     dir: &Path,
     gateway: &str,
+    gateway6: &str,
     iface_name: &str,
     concurrency: usize,
     debug: bool,
@@ -97,9 +223,19 @@ pub async fn add_routes_from_dir(
         }
     })?;
 
-    let gw: Ipv4Addr = gateway
-        .parse()
-        .with_context(|| format!("invalid gateway IP: {gateway}"))?;
+    let gw: Option<IpAddr> = if !gateway.is_empty() {
+        Some(gateway.parse().with_context(|| format!("invalid gateway IP: {gateway}"))?)
+    } else {
+        None
+    };
+
+    let gw6: Option<IpAddr> = if !gateway6.is_empty() {
+        Some(gateway6.parse().with_context(|| format!("invalid gateway6 IP: {gateway6}"))?)
+    } else {
+        None
+    };
+
+    tracing::info!("Using route gateways: gw={:?}, gw6={:?}", gw, gw6);
 
     let mut json_files: Vec<String> = Vec::new();
     let entries =
@@ -147,7 +283,34 @@ pub async fn add_routes_from_dir(
 
         stream::iter(destinations.into_iter())
             .for_each_concurrent(concurrency, |dest| async move {
-                match add_route(handle_ref, &dest, gw, iface_index).await {
+                // Determine which gateway to use based on destination IP version.
+                // We only need to distinguish IPv4 vs IPv6 here; full parsing is done in add_route.
+                let is_ipv4 = match dest.split('/').next() {
+                    Some(ip_part) if !ip_part.is_empty() => {
+                        // Heuristic: IPv6 addresses contain ':', IPv4 addresses do not.
+                        !ip_part.contains(':')
+                    }
+                    _ => {
+                        tracing::error!("Invalid destination format {dest}");
+                        stats_ref.add_error("parse_error");
+                        return;
+                    }
+                };
+
+                let route_gw: Option<IpAddr> = if is_ipv4 {
+                    gw.filter(|g| g.is_ipv4())
+                } else {
+                    // For IPv6 on TUN interfaces, don't use gateway if it's assigned to the interface itself
+                    // TUN interfaces need interface-only routes
+                    if iface_name.contains("tun") {
+                        tracing::debug!("TUN interface detected, using interface-only IPv6 route for {dest}");
+                        None
+                    } else {
+                        gw6.filter(|g| g.is_ipv6()).or_else(|| gw.filter(|g| g.is_ipv6()))
+                    }
+                };
+
+                match add_route(handle_ref, &dest, route_gw, iface_index).await {
                     Ok(()) => {
                         stats_ref.add_success();
                     }
@@ -157,7 +320,7 @@ pub async fn add_routes_from_dir(
                         match err_type {
                             "file_exists" => {
                                 stats_ref.add_already_exist(format!(
-                                    "{dest} via {gateway} dev {iface_name}"
+                                    "{dest} via {route_gw:?} dev {iface_name}"
                                 ));
                             }
                             "no_such_device" => {
@@ -165,13 +328,16 @@ pub async fn add_routes_from_dir(
                                     "interface '{}' disappeared during route loading",
                                     iface_name
                                 );
+                                stats_ref.add_error("no_such_device");
                             }
                             _ => {
                                 stats_ref.add_error(err_type);
+                                // Show error type and full details for debugging
+                                tracing::warn!(
+                                    "Failed route {dest} via {route_gw:?} dev {iface_name}: {err_type}"
+                                );
                                 if debug {
-                                    tracing::error!(
-                                        "Error adding route for {dest} via {gateway} dev {iface_name}: {e}"
-                                    );
+                                    tracing::info!("  Root cause: {e:#}");
                                 }
                             }
                         }

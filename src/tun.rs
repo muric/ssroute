@@ -70,9 +70,8 @@ pub fn create_tun(name: &str, persistent: bool) -> Result<Option<OwnedFd>> {
     Ok(Some(owned))
 }
 
-
-/// Configure TUN interface: assign IP address (gateway/24), set MTU, bring up.
-pub async fn configure_tun(name: &str, gateway: &str, mtu: u16) -> Result<()> {
+/// Configure TUN interface: assign IP addresses (gateway/24 and gateway6/64), set MTU, bring up.
+pub async fn configure_tun(name: &str, gateway: &str, gateway6: &str, mtu: u16) -> Result<()> {
     let (connection, handle, _) = rtnetlink::new_connection()
         .context("create netlink connection")?;
     let _conn = tokio::spawn(connection);
@@ -87,26 +86,56 @@ pub async fn configure_tun(name: &str, gateway: &str, mtu: u16) -> Result<()> {
         .with_context(|| format!("interface not found: {name}"))?;
     let index = link.header.index;
 
-    // Parse gateway as IPv4
-    let addr: std::net::Ipv4Addr = gateway
-        .parse()
-        .with_context(|| format!("invalid gateway IP: {gateway}"))?;
+    // Add IPv4 address if gateway is set
+    if !gateway.is_empty() {
+        let addr: std::net::IpAddr = gateway
+            .parse()
+            .with_context(|| format!("invalid gateway IP: {gateway}"))?;
+        if !addr.is_ipv4() {
+            bail!("gateway must be IPv4 address: {gateway}");
+        }
+        let result = handle
+            .address()
+            .add(index, addr, 24)
+            .execute()
+            .await;
 
-    // Add address (gateway/24)
-    let result = handle
-        .address()
-        .add(index, std::net::IpAddr::V4(addr), 24)
-        .execute()
-        .await;
+        match result {
+            Ok(()) => {}
+            Err(e) => {
+                let err_str = format!("{e}");
+                if err_str.contains("File exists") || err_str.contains("EEXIST") {
+                    tracing::warn!("IPv4 {gateway} already set on interface {name}");
+                } else {
+                    return Err(e).context("add IPv4 address to interface");
+                }
+            }
+        }
+    }
 
-    match result {
-        Ok(()) => {}
-        Err(e) => {
-            let err_str = format!("{e}");
-            if err_str.contains("File exists") || err_str.contains("EEXIST") {
-                tracing::warn!("IP {gateway} already set on interface {name}");
-            } else {
-                return Err(e).context("add address to interface");
+    // Add IPv6 address if gateway6 is set
+    if !gateway6.is_empty() {
+        let addr: std::net::IpAddr = gateway6
+            .parse()
+            .with_context(|| format!("invalid gateway6 IP: {gateway6}"))?;
+        if !addr.is_ipv6() {
+            bail!("gateway6 must be IPv6 address: {gateway6}");
+        }
+        let result = handle
+            .address()
+            .add(index, addr, 64)
+            .execute()
+            .await;
+
+        match result {
+            Ok(()) => {}
+            Err(e) => {
+                let err_str = format!("{e}");
+                if err_str.contains("File exists") || err_str.contains("EEXIST") {
+                    tracing::warn!("IPv6 {gateway6} already set on interface {name}");
+                } else {
+                    return Err(e).context("add IPv6 address to interface");
+                }
             }
         }
     }

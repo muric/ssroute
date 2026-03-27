@@ -160,6 +160,7 @@ nano ssroute.conf  # или: sudo nano /etc/ssroute/ssroute.conf
 
 ```ini
 gateway=10.0.0.1
+gateway6=2001:db8::1
 interface=tun2
 concurrency=100
 debug=false
@@ -171,6 +172,7 @@ ss_enabled=false
 ```ini
 # TUN-интерфейс
 gateway=10.0.0.1
+gateway6=2001:db8::1
 interface=tun2
 concurrency=100
 debug=false
@@ -199,9 +201,10 @@ obfs_mode=disable
 
 | Параметр | Описание | По умолчанию |
 |----------|----------|--------------|
-| `gateway` | IP-адрес, назначаемый TUN-интерфейсу | (обязательный) |
+| `gateway` | IPv4-адрес, назначаемый TUN-интерфейсу; обязателен для IPv4-маршрутизации (должен быть задан `gateway` или `gateway6`) | (см. описание) |
+| `gateway6` | IPv6-адрес, назначаемый TUN-интерфейсу; обязателен для IPv6-маршрутизации (должен быть задан `gateway` или `gateway6`) | (см. описание) |
 | `interface` | Имя TUN-интерфейса (например `tun2`) | (обязательный) |
-| `default_gw` | Шлюз для маршрутов из `default_route/` | (опционально) |
+| `default_gw` | Шлюз (IPv4 или IPv6) для маршрутов из `default_route/` | (опционально) |
 | `default_interface` | Интерфейс для маршрутов из `default_route/` | (опционально) |
 | `concurrency` | Количество параллельных воркеров для загрузки маршрутов | `4` |
 | `debug` | Подробное логирование ошибок маршрутизации | `false` |
@@ -468,6 +471,7 @@ Format: `key=value`, lines starting with `#` are comments, blank lines are ignor
 
 ```ini
 gateway=10.0.0.1
+gateway6=2001:db8::1
 interface=tun2
 concurrency=100
 debug=false
@@ -479,6 +483,7 @@ ss_enabled=false
 ```ini
 # TUN interface
 gateway=10.0.0.1
+gateway6=2001:db8::1
 interface=tun2
 concurrency=100
 debug=false
@@ -486,6 +491,7 @@ mtu=1400
 
 # Default interface (for routes in default_route/)
 default_gw=192.168.1.1
+# or for IPv6: default_gw=2001:db8::1
 default_interface=eth0
 
 # Shadowsocks
@@ -507,9 +513,10 @@ obfs_mode=disable
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `gateway` | IP address assigned to TUN interface | (required) |
+| `gateway` | IP address (IPv4) assigned to TUN interface | (required for IPv4; at least one of `gateway`/`gateway6` is required) |
+| `gateway6` | IPv6 address assigned to TUN interface | (required for IPv6; at least one of `gateway`/`gateway6` is required) |
 | `interface` | TUN interface name (e.g. `tun2`) | (required) |
-| `default_gw` | Gateway for routes in `default_route/` dir | (optional) |
+| `default_gw` | Gateway (IPv4 or IPv6) for routes in `default_route/` dir | (optional) |
 | `default_interface` | Interface for routes in `default_route/` dir | (optional) |
 | `concurrency` | Parallel workers for route loading | `4` |
 | `debug` | Verbose error logging for routes | `false` |

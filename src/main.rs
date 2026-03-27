@@ -118,7 +118,7 @@ async fn run_oneshot_mode(config: &config::Config, config_dir: &Path) -> Result<
     tun::create_tun(&config.interface, true)?;
 
     tracing::info!("Setting gateway IP and MTU={} on TUN interface", config.mtu);
-    tun::configure_tun(&config.interface, &config.gateway, config.mtu).await?;
+    tun::configure_tun(&config.interface, &config.gateway, &config.gateway6, config.mtu).await?;
 
     let stats = Arc::new(stats::Stats::new());
     add_routes(config, config_dir, &stats).await;
@@ -179,9 +179,16 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
         eprintln!("NetworkManager integration error: {}", e);
     }
 
+    // Configure TUN interface: assign IP addresses and MTU
+    tracing::info!("Configuring TUN interface {} with gateway={}, gateway6={}, mtu={}", 
+        config.interface, config.gateway, config.gateway6, config.mtu);
+    if let Err(e) = tun::configure_tun(&config.interface, &config.gateway, &config.gateway6, config.mtu).await {
+        tracing::warn!("Failed to configure TUN interface: {e}");
+    }
+
     if config.mtu > 0 {
         if let Err(e) = set_mtu(&config.interface, config.mtu).await {
-            tracing::warn!("Failed to set MTU: {e}");
+            tracing::warn!("Failed to set MTU (backup): {e}");
         }
     }
     
@@ -212,12 +219,13 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
 
 /// Add routes from data/ and default_route/ relative to config_dir.
 async fn add_routes(config: &config::Config, config_dir: &Path, stats: &Arc<stats::Stats>) {
-    if !config.interface.is_empty() && !config.gateway.is_empty() {
+    if !config.interface.is_empty() && (!config.gateway.is_empty() || !config.gateway6.is_empty()) {
         let dir = config_dir.join("data");
         tracing::info!("Adding routes for interface: {} from {}", config.interface, dir.display());
         if let Err(e) = route::add_routes_from_dir(
             &dir,
             &config.gateway,
+            &config.gateway6,
             &config.interface,
             config.concurrency,
             config.debug,
@@ -235,6 +243,7 @@ async fn add_routes(config: &config::Config, config_dir: &Path, stats: &Arc<stat
         if let Err(e) = route::add_routes_from_dir(
             &dir,
             &config.default_gateway,
+            "", // no separate IPv6 gateway for default routes
             &config.default_interface,
             config.concurrency,
             config.debug,
