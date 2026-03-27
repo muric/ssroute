@@ -513,8 +513,8 @@ obfs_mode=disable
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `gateway` | IP address (IPv4) assigned to TUN interface | (required) |
-| `gateway6` | IPv6 address assigned to TUN interface | (optional) |
+| `gateway` | IP address (IPv4) assigned to TUN interface | (required for IPv4; at least one of `gateway`/`gateway6` is required) |
+| `gateway6` | IPv6 address assigned to TUN interface | (required for IPv6; at least one of `gateway`/`gateway6` is required) |
 | `interface` | TUN interface name (e.g. `tun2`) | (required) |
 | `default_gw` | Gateway (IPv4 or IPv6) for routes in `default_route/` dir | (optional) |
 | `default_interface` | Interface for routes in `default_route/` dir | (optional) |
