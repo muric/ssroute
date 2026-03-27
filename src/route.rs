@@ -283,17 +283,21 @@ pub async fn add_routes_from_dir(
 
         stream::iter(destinations.into_iter())
             .for_each_concurrent(concurrency, |dest| async move {
-                // Determine which gateway to use based on destination IP version
-                let (dest_ip, _) = match parse_destination(&dest) {
-                    Ok((ip, prefix)) => (ip, prefix),
-                    Err(e) => {
-                        tracing::error!("Error parsing destination {dest}: {e}");
+                // Determine which gateway to use based on destination IP version.
+                // We only need to distinguish IPv4 vs IPv6 here; full parsing is done in add_route.
+                let is_ipv4 = match dest.split('/').next() {
+                    Some(ip_part) if !ip_part.is_empty() => {
+                        // Heuristic: IPv6 addresses contain ':', IPv4 addresses do not.
+                        !ip_part.contains(':')
+                    }
+                    _ => {
+                        tracing::error!("Invalid destination format {dest}");
                         stats_ref.add_error("parse_error");
                         return;
                     }
                 };
 
-                let route_gw: Option<IpAddr> = if dest_ip.is_ipv4() {
+                let route_gw: Option<IpAddr> = if is_ipv4 {
                     gw.filter(|g| g.is_ipv4())
                 } else {
                     // For IPv6 on TUN interfaces, don't use gateway if it's assigned to the interface itself
