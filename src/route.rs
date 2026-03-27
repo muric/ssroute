@@ -12,40 +12,32 @@ use crate::stats::{classify_error_str, Stats};
 async fn add_route(
     handle: &rtnetlink::Handle,
     destination: &str,
-    gateway: IpAddr,
+    gateway: Option<IpAddr>,
     iface_index: u32,
 ) -> Result<()> {
     let (ip, prefix_len) = parse_destination(destination)?;
 
-    match (ip, gateway) {
-        (IpAddr::V4(dest_ip), IpAddr::V4(gw_ip)) => {
-            handle
-                .route()
-                .add()
-                .v4()
-                .destination_prefix(dest_ip, prefix_len)
-                .gateway(gw_ip)
-                .output_interface(iface_index)
-                .execute()
-                .await
-                .with_context(|| format!("add route {destination} via {gateway} dev index {iface_index}"))?;
+    let add_req = match ip {
+        IpAddr::V4(dest_ip) => {
+            let mut builder = handle.route().add().v4().destination_prefix(dest_ip, prefix_len).output_interface(iface_index);
+            if let Some(IpAddr::V4(gw_ip)) = gateway {
+                builder = builder.gateway(gw_ip);
+            }
+            builder
         }
-        (IpAddr::V6(dest_ip), IpAddr::V6(gw_ip)) => {
-            handle
-                .route()
-                .add()
-                .v6()
-                .destination_prefix(dest_ip, prefix_len)
-                .gateway(gw_ip)
-                .output_interface(iface_index)
-                .execute()
-                .await
-                .with_context(|| format!("add route {destination} via {gateway} dev index {iface_index}"))?;
+        IpAddr::V6(dest_ip) => {
+            let mut builder = handle.route().add().v6().destination_prefix(dest_ip, prefix_len).output_interface(iface_index);
+            if let Some(IpAddr::V6(gw_ip)) = gateway {
+                builder = builder.gateway(gw_ip);
+            }
+            builder
         }
-        _ => {
-            bail!("IP version mismatch: destination {ip} and gateway {gateway} must be the same IP version");
-        }
-    }
+    };
+
+    add_req
+        .execute()
+        .await
+        .with_context(|| format!("add route {destination} via {gateway:?} dev index {iface_index}"))?;
 
     Ok(())
 }
@@ -189,28 +181,15 @@ pub async fn add_routes_from_dir(
                     }
                 };
 
-                let route_gw = if dest_ip.is_ipv4() {
-                    match gw {
-                        Some(g) if g.is_ipv4() => g,
-                        _ => {
-                            tracing::error!("No IPv4 gateway configured for IPv4 destination {dest}");
-                            stats_ref.add_error("no_ipv4_gateway");
-                            return;
-                        }
-                    }
+                let route_gw: Option<IpAddr> = if dest_ip.is_ipv4() {
+                    gw.filter(|g| g.is_ipv4())
                 } else {
-                    match gw6 {
-                        Some(g) if g.is_ipv6() => g,
-                        _ => match gw {
-                            Some(g) if g.is_ipv6() => g,
-                            _ => {
-                                tracing::error!("No IPv6 gateway configured for IPv6 destination {dest}");
-                                stats_ref.add_error("no_ipv6_gateway");
-                                return;
-                            }
-                        },
-                    }
+                    gw6.filter(|g| g.is_ipv6()).or_else(|| gw.filter(|g| g.is_ipv6()))
                 };
+
+                if route_gw.is_none() {
+                    tracing::info!("No gateway for {dest}, adding route on interface {iface_name} only");
+                }
 
                 match add_route(handle_ref, &dest, route_gw, iface_index).await {
                     Ok(()) => {
@@ -222,7 +201,7 @@ pub async fn add_routes_from_dir(
                         match err_type {
                             "file_exists" => {
                                 stats_ref.add_already_exist(format!(
-                                    "{dest} via {gateway} dev {iface_name}"
+                                    "{dest} via {route_gw:?} dev {iface_name}"
                                 ));
                             }
                             "no_such_device" => {
