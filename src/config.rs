@@ -18,6 +18,7 @@ pub enum ObfsMode {
 pub struct Config {
     // Network
     pub gateway: String,
+    pub gateway6: String,
     pub interface: String,
     pub default_gateway: String,
     pub default_interface: String,
@@ -45,6 +46,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             gateway: String::new(),
+            gateway6: String::new(),
             interface: String::new(),
             default_gateway: String::new(),
             default_interface: String::new(),
@@ -93,6 +95,7 @@ pub fn read_config(path: &Path) -> Result<Config> {
 
         match key {
             "gateway" => config.gateway = value.to_string(),
+            "gateway6" => config.gateway6 = value.to_string(),
             "interface" => config.interface = value.to_string(),
             "default_gw" => config.default_gateway = value.to_string(),
             "default_interface" => config.default_interface = value.to_string(),
@@ -234,5 +237,12 @@ mod tests {
         let f = write_temp_config("gateway=2001:db8::1\ninterface=tun2\n");
         let config = read_config(f.path()).unwrap();
         assert_eq!(config.gateway, "2001:db8::1");
+    }
+
+    #[test]
+    fn test_ipv6_gateway6() {
+        let f = write_temp_config("gateway6=2001:db8::2\ninterface=tun2\n");
+        let config = read_config(f.path()).unwrap();
+        assert_eq!(config.gateway6, "2001:db8::2");
     }
 }

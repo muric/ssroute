@@ -118,7 +118,7 @@ async fn run_oneshot_mode(config: &config::Config, config_dir: &Path) -> Result<
     tun::create_tun(&config.interface, true)?;
 
     tracing::info!("Setting gateway IP and MTU={} on TUN interface", config.mtu);
-    tun::configure_tun(&config.interface, &config.gateway, config.mtu).await?;
+    tun::configure_tun(&config.interface, &config.gateway, &config.gateway6, config.mtu).await?;
 
     let stats = Arc::new(stats::Stats::new());
     add_routes(config, config_dir, &stats).await;
@@ -218,6 +218,7 @@ async fn add_routes(config: &config::Config, config_dir: &Path, stats: &Arc<stat
         if let Err(e) = route::add_routes_from_dir(
             &dir,
             &config.gateway,
+            &config.gateway6,
             &config.interface,
             config.concurrency,
             config.debug,
@@ -235,6 +236,7 @@ async fn add_routes(config: &config::Config, config_dir: &Path, stats: &Arc<stat
         if let Err(e) = route::add_routes_from_dir(
             &dir,
             &config.default_gateway,
+            "", // no separate IPv6 gateway for default routes
             &config.default_interface,
             config.concurrency,
             config.debug,

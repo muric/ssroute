@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -12,43 +12,64 @@ use crate::stats::{classify_error_str, Stats};
 async fn add_route(
     handle: &rtnetlink::Handle,
     destination: &str,
-    gateway: Ipv4Addr,
+    gateway: IpAddr,
     iface_index: u32,
 ) -> Result<()> {
     let (ip, prefix_len) = parse_destination(destination)?;
 
-    handle
-        .route()
-        .add()
-        .v4()
-        .destination_prefix(ip, prefix_len)
-        .gateway(gateway)
-        .output_interface(iface_index)
-        .execute()
-        .await
-        .with_context(|| format!("add route {destination} via {gateway} dev index {iface_index}"))?;
+    match (ip, gateway) {
+        (IpAddr::V4(dest_ip), IpAddr::V4(gw_ip)) => {
+            handle
+                .route()
+                .add()
+                .v4()
+                .destination_prefix(dest_ip, prefix_len)
+                .gateway(gw_ip)
+                .output_interface(iface_index)
+                .execute()
+                .await
+                .with_context(|| format!("add route {destination} via {gateway} dev index {iface_index}"))?;
+        }
+        (IpAddr::V6(dest_ip), IpAddr::V6(gw_ip)) => {
+            handle
+                .route()
+                .add()
+                .v6()
+                .destination_prefix(dest_ip, prefix_len)
+                .gateway(gw_ip)
+                .output_interface(iface_index)
+                .execute()
+                .await
+                .with_context(|| format!("add route {destination} via {gateway} dev index {iface_index}"))?;
+        }
+        _ => {
+            bail!("IP version mismatch: destination {ip} and gateway {gateway} must be the same IP version");
+        }
+    }
 
     Ok(())
 }
 
-/// Parse a destination string as either a CIDR or a bare IP (treated as /32).
-fn parse_destination(dest: &str) -> Result<(Ipv4Addr, u8)> {
+/// Parse a destination string as either a CIDR or a bare IP (treated as /32 for IPv4 or /128 for IPv6).
+fn parse_destination(dest: &str) -> Result<(IpAddr, u8)> {
     if let Some((ip_str, prefix_str)) = dest.split_once('/') {
-        let ip: Ipv4Addr = ip_str
+        let ip: IpAddr = ip_str
             .parse()
             .with_context(|| format!("invalid IP in CIDR: {dest}"))?;
         let prefix: u8 = prefix_str
             .parse()
             .with_context(|| format!("invalid prefix in CIDR: {dest}"))?;
-        if prefix > 32 {
-            bail!("prefix length {prefix} exceeds 32 in: {dest}");
+        let max_prefix = if ip.is_ipv4() { 32 } else { 128 };
+        if prefix > max_prefix {
+            bail!("prefix length {prefix} exceeds {max_prefix} in: {dest}");
         }
         Ok((ip, prefix))
     } else {
-        let ip: Ipv4Addr = dest
+        let ip: IpAddr = dest
             .parse()
             .with_context(|| format!("invalid IP address: {dest}"))?;
-        Ok((ip, 32))
+        let default_prefix = if ip.is_ipv4() { 32 } else { 128 };
+        Ok((ip, default_prefix))
     }
 }
 
@@ -70,6 +91,7 @@ async fn get_iface_index(handle: &rtnetlink::Handle, name: &str) -> Result<u32> 
 pub async fn add_routes_from_dir(
     dir: &Path,
     gateway: &str,
+    gateway6: &str,
     iface_name: &str,
     concurrency: usize,
     debug: bool,
@@ -97,9 +119,17 @@ pub async fn add_routes_from_dir(
         }
     })?;
 
-    let gw: Ipv4Addr = gateway
-        .parse()
-        .with_context(|| format!("invalid gateway IP: {gateway}"))?;
+    let gw: Option<IpAddr> = if !gateway.is_empty() {
+        Some(gateway.parse().with_context(|| format!("invalid gateway IP: {gateway}"))?)
+    } else {
+        None
+    };
+
+    let gw6: Option<IpAddr> = if !gateway6.is_empty() {
+        Some(gateway6.parse().with_context(|| format!("invalid gateway6 IP: {gateway6}"))?)
+    } else {
+        None
+    };
 
     let mut json_files: Vec<String> = Vec::new();
     let entries =
@@ -147,7 +177,37 @@ pub async fn add_routes_from_dir(
 
         stream::iter(destinations.into_iter())
             .for_each_concurrent(concurrency, |dest| async move {
-                match add_route(handle_ref, &dest, gw, iface_index).await {
+                // Determine which gateway to use based on destination IP version
+                let (dest_ip, _) = match parse_destination(&dest) {
+                    Ok((ip, prefix)) => (ip, prefix),
+                    Err(e) => {
+                        tracing::error!("Error parsing destination {dest}: {e}");
+                        stats_ref.add_error("parse_error");
+                        return;
+                    }
+                };
+
+                let route_gw = if dest_ip.is_ipv4() {
+                    match gw {
+                        Some(g) if g.is_ipv4() => g,
+                        _ => {
+                            tracing::error!("No IPv4 gateway configured for IPv4 destination {dest}");
+                            stats_ref.add_error("no_ipv4_gateway");
+                            return;
+                        }
+                    }
+                } else {
+                    match gw6 {
+                        Some(g) if g.is_ipv6() => g,
+                        _ => {
+                            tracing::error!("No IPv6 gateway configured for IPv6 destination {dest}");
+                            stats_ref.add_error("no_ipv6_gateway");
+                            return;
+                        }
+                    }
+                };
+
+                match add_route(handle_ref, &dest, route_gw, iface_index).await {
                     Ok(()) => {
                         stats_ref.add_success();
                     }
