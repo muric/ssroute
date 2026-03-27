@@ -121,10 +121,37 @@ async fn add_route(
     }
 }
 
-/// Check if error is "file already exists" (os error 17)
-fn is_file_exists<E: std::fmt::Display>(e: &E) -> bool {
-    let s = format!("{}", e).to_lowercase();
-    s.contains("file exists") || s.contains("error 17")
+/// Check if error is "file already exists" (os error 17 / EEXIST).
+///
+/// Prefer structured inspection of the error chain (io::ErrorKind, raw_os_error)
+/// and only fall back to substring checks on the formatted message.
+fn is_file_exists<E>(e: &E) -> bool
+where
+    E: std::error::Error + 'static,
+{
+    // Numeric code for EEXIST on Unix-like systems.
+    const EEXIST: i32 = 17;
+
+    // Walk the error chain looking for an underlying io::Error with
+    // Either ErrorKind::AlreadyExists or the EEXIST raw OS code.
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = current {
+        if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+            if io_err.kind() == std::io::ErrorKind::AlreadyExists {
+                return true;
+            }
+            if io_err.raw_os_error() == Some(EEXIST) {
+                return true;
+            }
+        }
+        current = err.source();
+    }
+
+    // Fallback: match common substrings in the formatted message.
+    // This keeps compatibility with environments where only the textual
+    // representation is available.
+    let s = e.to_string().to_lowercase();
+    s.contains("file exists") || s.contains("eexist") || s.contains("error 17")
 }
 
 /// Parse a destination string as either a CIDR or a bare IP (treated as /32 for IPv4 or /128 for IPv6).
