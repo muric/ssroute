@@ -212,7 +212,7 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
 
 /// Add routes from data/ and default_route/ relative to config_dir.
 async fn add_routes(config: &config::Config, config_dir: &Path, stats: &Arc<stats::Stats>) {
-    if !config.interface.is_empty() && !config.gateway.is_empty() {
+    if !config.interface.is_empty() && (!config.gateway.is_empty() || !config.gateway6.is_empty()) {
         let dir = config_dir.join("data");
         tracing::info!("Adding routes for interface: {} from {}", config.interface, dir.display());
         if let Err(e) = route::add_routes_from_dir(

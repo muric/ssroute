@@ -131,6 +131,8 @@ pub async fn add_routes_from_dir(
         None
     };
 
+    tracing::info!("Using route gateways: gw={:?}, gw6={:?}", gw, gw6);
+
     let mut json_files: Vec<String> = Vec::new();
     let entries =
         std::fs::read_dir(dir_path).with_context(|| format!("read directory {}", dir.display()))?;
@@ -199,11 +201,14 @@ pub async fn add_routes_from_dir(
                 } else {
                     match gw6 {
                         Some(g) if g.is_ipv6() => g,
-                        _ => {
-                            tracing::error!("No IPv6 gateway configured for IPv6 destination {dest}");
-                            stats_ref.add_error("no_ipv6_gateway");
-                            return;
-                        }
+                        _ => match gw {
+                            Some(g) if g.is_ipv6() => g,
+                            _ => {
+                                tracing::error!("No IPv6 gateway configured for IPv6 destination {dest}");
+                                stats_ref.add_error("no_ipv6_gateway");
+                                return;
+                            }
+                        },
                     }
                 };
 

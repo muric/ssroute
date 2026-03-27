@@ -37,8 +37,13 @@ pub fn build_ss_config(config: &Config) -> Result<SsConfig> {
     local.mode = Mode::TcpAndUdp;
     local.tun_interface_name = Some(config.interface.clone());
 
-    // Parse address as IpNet
-    let addr_cidr = format!("{}/{}", config.gateway, if config.gateway.contains(':') { 64 } else { 24 });
+    // Parse address as IpNet (prefer IPv6 gateway6 if present, else gateway)
+    let addr = if !config.gateway6.is_empty() {
+        config.gateway6.clone()
+    } else {
+        config.gateway.clone()
+    };
+    let addr_cidr = format!("{}/{}", addr, if addr.contains(':') { 64 } else { 24 });
     local.tun_interface_address = Some(
         addr_cidr
             .parse()
