@@ -17,27 +17,42 @@ async fn add_route(
 ) -> Result<()> {
     let (ip, prefix_len) = parse_destination(destination)?;
 
-    let add_req = match ip {
+    match ip {
         IpAddr::V4(dest_ip) => {
-            let mut builder = handle.route().add().v4().destination_prefix(dest_ip, prefix_len).output_interface(iface_index);
+            let mut builder = handle
+                .route()
+                .add()
+                .v4()
+                .destination_prefix(dest_ip, prefix_len)
+                .output_interface(iface_index);
+
             if let Some(IpAddr::V4(gw_ip)) = gateway {
                 builder = builder.gateway(gw_ip);
             }
+
             builder
+                .execute()
+                .await
+                .with_context(|| format!("add route {destination} via {gateway:?} dev index {iface_index}"))?;
         }
         IpAddr::V6(dest_ip) => {
-            let mut builder = handle.route().add().v6().destination_prefix(dest_ip, prefix_len).output_interface(iface_index);
+            let mut builder = handle
+                .route()
+                .add()
+                .v6()
+                .destination_prefix(dest_ip, prefix_len)
+                .output_interface(iface_index);
+
             if let Some(IpAddr::V6(gw_ip)) = gateway {
                 builder = builder.gateway(gw_ip);
             }
-            builder
-        }
-    };
 
-    add_req
-        .execute()
-        .await
-        .with_context(|| format!("add route {destination} via {gateway:?} dev index {iface_index}"))?;
+            builder
+                .execute()
+                .await
+                .with_context(|| format!("add route {destination} via {gateway:?} dev index {iface_index}"))?;
+        }
+    }
 
     Ok(())
 }
