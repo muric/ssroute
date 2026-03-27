@@ -9,6 +9,7 @@ use futures::TryStreamExt;
 use crate::stats::{classify_error_str, Stats};
 
 /// Add a single route via netlink.
+/// Returns Ok(()) if route added or already exists, Err only for real errors.
 async fn add_route(
     handle: &rtnetlink::Handle,
     destination: &str,
@@ -30,10 +31,47 @@ async fn add_route(
                 builder = builder.gateway(gw_ip);
             }
 
-            builder
-                .execute()
-                .await
-                .with_context(|| format!("add route {destination} via {gateway:?} dev index {iface_index}"))?;
+            match builder.execute().await {
+                Ok(()) => return Ok(()),
+                Err(e) if is_file_exists(&e) => {
+                    // Route already exists - not an error
+                    tracing::debug!("Route {destination} already exists, skipping");
+                    return Ok(());
+                }
+                Err(e) if gateway.is_some() => {
+                    // If adding route with gateway fails, try without gateway (interface-only)
+                    tracing::debug!("Route with gateway failed ({e}), trying without gateway");
+                    match handle
+                        .route()
+                        .add()
+                        .v4()
+                        .destination_prefix(dest_ip, prefix_len)
+                        .output_interface(iface_index)
+                        .execute()
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::debug!("Successfully added IPv4 route {destination} on interface (no gateway)");
+                            return Ok(());
+                        }
+                        Err(e) if is_file_exists(&e) => {
+                            tracing::debug!("Route {destination} already exists (interface-only), skipping");
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            return Err(e).with_context(|| format!(
+                                "netlink add_route (fallback): destination={destination}, iface_index={iface_index}"
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| format!(
+                        "netlink add_route: destination={destination}, gateway={:?}, iface_index={iface_index}",
+                        gateway
+                    ));
+                }
+            }
         }
         IpAddr::V6(dest_ip) => {
             let mut builder = handle
@@ -47,14 +85,54 @@ async fn add_route(
                 builder = builder.gateway(gw_ip);
             }
 
-            builder
-                .execute()
-                .await
-                .with_context(|| format!("add route {destination} via {gateway:?} dev index {iface_index}"))?;
+            match builder.execute().await {
+                Ok(()) => return Ok(()),
+                Err(e) if is_file_exists(&e) => {
+                    tracing::debug!("Route {destination} already exists, skipping");
+                    return Ok(());
+                }
+                Err(e) if gateway.is_some() => {
+                    // If adding route with gateway fails, try without gateway (interface-only)
+                    tracing::debug!("Route with gateway failed ({e}), trying without gateway");
+                    match handle
+                        .route()
+                        .add()
+                        .v6()
+                        .destination_prefix(dest_ip, prefix_len)
+                        .output_interface(iface_index)
+                        .execute()
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::debug!("Successfully added IPv6 route {destination} on interface (no gateway)");
+                            return Ok(());
+                        }
+                        Err(e) if is_file_exists(&e) => {
+                            tracing::debug!("Route {destination} already exists (interface-only), skipping");
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            return Err(e).with_context(|| format!(
+                                "netlink add_route (fallback): destination={destination}, iface_index={iface_index}"
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| format!(
+                        "netlink add_route: destination={destination}, gateway={:?}, iface_index={iface_index}",
+                        gateway
+                    ));
+                }
+            }
         }
     }
+}
 
-    Ok(())
+/// Check if error is "file already exists" (os error 17)
+fn is_file_exists(e: &anyhow::Error) -> bool {
+    let s = format!("{}", e).to_lowercase();
+    s.contains("file exists") || s.contains("error 17")
 }
 
 /// Parse a destination string as either a CIDR or a bare IP (treated as /32 for IPv4 or /128 for IPv6).
@@ -199,12 +277,15 @@ pub async fn add_routes_from_dir(
                 let route_gw: Option<IpAddr> = if dest_ip.is_ipv4() {
                     gw.filter(|g| g.is_ipv4())
                 } else {
-                    gw6.filter(|g| g.is_ipv6()).or_else(|| gw.filter(|g| g.is_ipv6()))
+                    // For IPv6 on TUN interfaces, don't use gateway if it's assigned to the interface itself
+                    // TUN interfaces need interface-only routes
+                    if iface_name.contains("tun") {
+                        tracing::debug!("TUN interface detected, using interface-only IPv6 route for {dest}");
+                        None
+                    } else {
+                        gw6.filter(|g| g.is_ipv6()).or_else(|| gw.filter(|g| g.is_ipv6()))
+                    }
                 };
-
-                if route_gw.is_none() {
-                    tracing::info!("No gateway for {dest}, adding route on interface {iface_name} only");
-                }
 
                 match add_route(handle_ref, &dest, route_gw, iface_index).await {
                     Ok(()) => {
@@ -224,13 +305,16 @@ pub async fn add_routes_from_dir(
                                     "interface '{}' disappeared during route loading",
                                     iface_name
                                 );
+                                stats_ref.add_error("no_such_device");
                             }
                             _ => {
                                 stats_ref.add_error(err_type);
+                                // Show error type and full details for debugging
+                                tracing::warn!(
+                                    "Failed route {dest} via {route_gw:?} dev {iface_name}: {err_type}"
+                                );
                                 if debug {
-                                    tracing::error!(
-                                        "Error adding route for {dest} via {gateway} dev {iface_name}: {e}"
-                                    );
+                                    tracing::info!("  Root cause: {e:#}");
                                 }
                             }
                         }

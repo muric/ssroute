@@ -179,9 +179,16 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
         eprintln!("NetworkManager integration error: {}", e);
     }
 
+    // Configure TUN interface: assign IP addresses and MTU
+    tracing::info!("Configuring TUN interface {} with gateway={}, gateway6={}, mtu={}", 
+        config.interface, config.gateway, config.gateway6, config.mtu);
+    if let Err(e) = tun::configure_tun(&config.interface, &config.gateway, &config.gateway6, config.mtu).await {
+        tracing::warn!("Failed to configure TUN interface: {e}");
+    }
+
     if config.mtu > 0 {
         if let Err(e) = set_mtu(&config.interface, config.mtu).await {
-            tracing::warn!("Failed to set MTU: {e}");
+            tracing::warn!("Failed to set MTU (backup): {e}");
         }
     }
     
