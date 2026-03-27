@@ -175,7 +175,8 @@ async fn duplicates_writer(mut rx: mpsc::Receiver<String>, filename: String) {
             }
             _ = flush_ticker.tick() => {
                 // Periodic flush regardless of message volume, so buffered strings
-                // don't accumulate in memory indefinitely under heavy traffic.
+                // don't accumulate in memory indefinitely when traffic is too low or
+                // bursty to reach the count-based flush threshold.
                 flush_buffer(&mut buffer, &mut file, &filename).await;
             }
         }
