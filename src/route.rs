@@ -32,11 +32,11 @@ async fn add_route(
             }
 
             match builder.execute().await {
-                Ok(()) => return Ok(()),
+                Ok(()) => Ok(()),
                 Err(e) if is_file_exists(&e) => {
                     // Route already exists - not an error
                     tracing::debug!("Route {destination} already exists, skipping");
-                    return Ok(());
+                    Ok(())
                 }
                 Err(e) if gateway.is_some() => {
                     // If adding route with gateway fails, try without gateway (interface-only)
@@ -52,25 +52,21 @@ async fn add_route(
                     {
                         Ok(()) => {
                             tracing::debug!("Successfully added IPv4 route {destination} on interface (no gateway)");
-                            return Ok(());
+                            Ok(())
                         }
                         Err(e) if is_file_exists(&e) => {
                             tracing::debug!("Route {destination} already exists (interface-only), skipping");
-                            return Ok(());
+                            Ok(())
                         }
-                        Err(e) => {
-                            return Err(e).with_context(|| format!(
-                                "netlink add_route (fallback): destination={destination}, iface_index={iface_index}"
-                            ));
-                        }
+                        Err(e) => Err(e).with_context(|| format!(
+                            "netlink add_route (fallback): destination={destination}, iface_index={iface_index}"
+                        )),
                     }
                 }
-                Err(e) => {
-                    return Err(e).with_context(|| format!(
-                        "netlink add_route: destination={destination}, gateway={:?}, iface_index={iface_index}",
-                        gateway
-                    ));
-                }
+                Err(e) => Err(e).with_context(|| format!(
+                    "netlink add_route: destination={destination}, gateway={:?}, iface_index={iface_index}",
+                    gateway
+                )),
             }
         }
         IpAddr::V6(dest_ip) => {
@@ -86,10 +82,10 @@ async fn add_route(
             }
 
             match builder.execute().await {
-                Ok(()) => return Ok(()),
+                Ok(()) => Ok(()),
                 Err(e) if is_file_exists(&e) => {
                     tracing::debug!("Route {destination} already exists, skipping");
-                    return Ok(());
+                    Ok(())
                 }
                 Err(e) if gateway.is_some() => {
                     // If adding route with gateway fails, try without gateway (interface-only)
@@ -105,25 +101,21 @@ async fn add_route(
                     {
                         Ok(()) => {
                             tracing::debug!("Successfully added IPv6 route {destination} on interface (no gateway)");
-                            return Ok(());
+                            Ok(())
                         }
                         Err(e) if is_file_exists(&e) => {
                             tracing::debug!("Route {destination} already exists (interface-only), skipping");
-                            return Ok(());
+                            Ok(())
                         }
-                        Err(e) => {
-                            return Err(e).with_context(|| format!(
-                                "netlink add_route (fallback): destination={destination}, iface_index={iface_index}"
-                            ));
-                        }
+                        Err(e) => Err(e).with_context(|| format!(
+                            "netlink add_route (fallback): destination={destination}, iface_index={iface_index}"
+                        )),
                     }
                 }
-                Err(e) => {
-                    return Err(e).with_context(|| format!(
-                        "netlink add_route: destination={destination}, gateway={:?}, iface_index={iface_index}",
-                        gateway
-                    ));
-                }
+                Err(e) => Err(e).with_context(|| format!(
+                    "netlink add_route: destination={destination}, gateway={:?}, iface_index={iface_index}",
+                    gateway
+                )),
             }
         }
     }
