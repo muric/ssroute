@@ -2,6 +2,9 @@
 
 ## Table of Contents / Оглавление
 
+- **Специальные гайды / Special Guides:**
+  - [🔐 V2Ray Plugin Setup (DPI Evasion)](V2RAY_SETUP.md) — Полное руководство по настройке V2Ray / Complete V2Ray configuration guide
+
 - Русский
   - [Обзор](#ru-overview)
   - [Как это работает](#ru-how-it-works)
@@ -219,6 +222,69 @@ obfs_mode=disable
 | `ss_plugin` | Путь к бинарнику SIP003-плагина | (опционально) |
 | `ss_plugin_opts` | Опции плагина | (опционально) |
 
+#### Конфигурация V2Ray (уклонение от DPI)
+
+V2Ray-плагин позволяет скрыть Shadowsocks трафик под легальный HTTPS/HTTP. Это полезно в регионах с активным DPI-фильтрованием.
+
+**Установка v2ray-plugin:**
+
+```bash
+# Debian/Ubuntu
+apt install v2ray-plugin
+
+# Или вручную скачать
+wget https://github.com/shadowsocks/v2ray-plugin/releases/download/v1.3.1/v2ray-plugin-linux-amd64 -O /usr/local/bin/v2ray-plugin
+chmod +x /usr/local/bin/v2ray-plugin
+```
+
+**Примеры конфигурации:**
+
+1. **Базовый HTTPS (TLS) режим:**
+   ```
+   obfs_mode=v2ray
+   obfs_host=www.bing.com
+   ss_plugin=v2ray-plugin
+   ss_plugin_opts=server;tls;host=www.bing.com
+   ```
+
+2. **HTTP режим (быстрее, менее защищен):**
+   ```
+   obfs_mode=v2ray
+   obfs_host=example.com
+   ss_plugin=v2ray-plugin
+   ss_plugin_opts=server;host=example.com
+   ```
+
+3. **С проверкой сертификата:**
+   ```
+   obfs_mode=v2ray
+   obfs_host=cloudflare.com
+   ss_plugin=v2ray-plugin
+   ss_plugin_opts=server;tls;host=cloudflare.com;cert=/etc/ssl/certs/ca-certificates.crt
+   ```
+
+**Важные замечания:**
+
+- **MTU**: Рекомендуется установить `mtu=1350` при использовании v2ray из-за накладных расходов на инкапсуляцию
+- **obfs_host**: Должен быть реальным доступным хостом, чтобы работала проверка сертификата TLS
+- **SIP003**: v2ray-plugin получает параметры через переменные окружения (`SS_REMOTE_HOST`, `SS_REMOTE_PORT`, `SS_LOCAL_HOST`, `SS_LOCAL_PORT`)
+
+Пример полной конфигурации с v2ray:
+```
+gateway=10.0.0.1
+interface=tun2
+ss_enabled=true
+ss_server=203.0.113.50
+ss_server_port=8388
+ss_password=your_secret_password
+ss_method=chacha20-ietf-poly1305
+obfs_mode=v2ray
+obfs_host=www.bing.com
+ss_plugin=v2ray-plugin
+ss_plugin_opts=server;tls;host=www.bing.com
+mtu=1350
+```
+
 <a id="ru-route-files"></a>
 ### Файлы маршрутов
 
@@ -308,6 +374,36 @@ ping -c 3 91.108.4.1
 ```bash
 curl -I https://www.google.com
 ```
+
+**Диагностика V2Ray (если используется):**
+
+При использовании v2ray-plugin важно убедиться, что плагин работает корректно:
+
+```bash
+# 1. Проверить наличие v2ray-plugin
+which v2ray-plugin
+v2ray-plugin --version
+
+# 2. Посмотреть логи ssroute, включая запуск v2ray
+sudo journalctl -u ssroute -f
+# Должны видеть: "Plugin v2ray-plugin started (pid=...)"
+
+# 3. Проверить процесс v2ray-plugin (должен быть запущен когда ssroute работает)
+ps aux | grep v2ray-plugin
+
+# 4. Проверить сетевые соединения v2ray
+sudo netstat -tlpn | grep v2ray
+
+# 5. Если сертификат не верифицируется, проверить наличие корневых сертификатов
+ls -la /etc/ssl/certs/ca-certificates.crt
+```
+
+Частые проблемы с v2ray:
+
+- **"Plugin did not become ready"** → v2ray-plugin не запустилась, проверьте установку и права доступа
+- **TLS handshake failed** → неверный `obfs_host` или проблемы с сертификатом
+- **Low bandwidth** → обычно нормально, v2ray добавляет накладные расходы; рассмотрите HTTP режим
+- Увеличьте MTU если видите фрагментацию: установите `mtu=1350` вместо `1500`
 
 <a id="ru-debugging"></a>
 ### Логирование и отладка
@@ -531,6 +627,69 @@ obfs_mode=disable
 | `ss_plugin` | Path to SIP003 plugin binary | (optional) |
 | `ss_plugin_opts` | Plugin options string | (optional) |
 
+#### V2Ray Configuration (DPI Evasion)
+
+The V2Ray plugin tunnels Shadowsocks traffic through legitimate HTTPS/HTTP connections, bypassing DPI filters in restrictive regions.
+
+**Installing v2ray-plugin:**
+
+```bash
+# Debian/Ubuntu
+apt install v2ray-plugin
+
+# Or download manually
+wget https://github.com/shadowsocks/v2ray-plugin/releases/download/v1.3.1/v2ray-plugin-linux-amd64 -O /usr/local/bin/v2ray-plugin
+chmod +x /usr/local/bin/v2ray-plugin
+```
+
+**Configuration Examples:**
+
+1. **Basic HTTPS (TLS) mode:**
+   ```
+   obfs_mode=v2ray
+   obfs_host=www.bing.com
+   ss_plugin=v2ray-plugin
+   ss_plugin_opts=server;tls;host=www.bing.com
+   ```
+
+2. **HTTP mode (faster, less secure):**
+   ```
+   obfs_mode=v2ray
+   obfs_host=example.com
+   ss_plugin=v2ray-plugin
+   ss_plugin_opts=server;host=example.com
+   ```
+
+3. **With certificate verification:**
+   ```
+   obfs_mode=v2ray
+   obfs_host=cloudflare.com
+   ss_plugin=v2ray-plugin
+   ss_plugin_opts=server;tls;host=cloudflare.com;cert=/etc/ssl/certs/ca-certificates.crt
+   ```
+
+**Important Notes:**
+
+- **MTU**: Set `mtu=1350` when using v2ray due to encapsulation overhead
+- **obfs_host**: Must be a real accessible host for TLS certificate verification to work
+- **SIP003**: v2ray-plugin receives parameters via environment variables (`SS_REMOTE_HOST`, `SS_REMOTE_PORT`, `SS_LOCAL_HOST`, `SS_LOCAL_PORT`)
+
+Full configuration example with v2ray:
+```
+gateway=10.0.0.1
+interface=tun2
+ss_enabled=true
+ss_server=203.0.113.50
+ss_server_port=8388
+ss_password=your_secret_password
+ss_method=chacha20-ietf-poly1305
+obfs_mode=v2ray
+obfs_host=www.bing.com
+ss_plugin=v2ray-plugin
+ss_plugin_opts=server;tls;host=www.bing.com
+mtu=1350
+```
+
 <a id="en-route-files"></a>
 ### Route Files
 
@@ -620,6 +779,36 @@ If the route for this IP goes through the TUN interface (listed in `data/`), the
 ```bash
 curl -I https://www.google.com
 ```
+
+**V2Ray Diagnostics (if used):**
+
+When using the v2ray-plugin, verify it works correctly:
+
+```bash
+# 1. Check v2ray-plugin is available
+which v2ray-plugin
+v2ray-plugin --version
+
+# 2. Check ssroute logs, including v2ray startup
+sudo journalctl -u ssroute -f
+# Should see: "Plugin v2ray-plugin started (pid=...)"
+
+# 3. Verify v2ray-plugin process is running (when ssroute is active)
+ps aux | grep v2ray-plugin
+
+# 4. Check network connections for v2ray
+sudo netstat -tlpn | grep v2ray
+
+# 5. If certificate verification fails, check CA certificates
+ls -la /etc/ssl/certs/ca-certificates.crt
+```
+
+Common V2Ray issues:
+
+- **"Plugin did not become ready"** → v2ray-plugin won't start; check installation and permissions
+- **TLS handshake failed** → wrong `obfs_host` or certificate issues
+- **Low bandwidth** → normal overhead; consider HTTP mode instead of TLS
+- If you see packet fragmentation, lower MTU: set `mtu=1350` instead of `1500`
 
 <a id="en-debugging"></a>
 ### Logging and Debugging

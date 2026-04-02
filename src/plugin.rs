@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use tokio::process::Command;
 
 /// A running SIP003-compatible plugin process.
@@ -62,6 +62,33 @@ pub async fn start_plugin(
     tracing::info!("Plugin {plugin} started (pid={pid}), listening on {local_addr}");
 
     Ok(PluginProcess { child, local_addr })
+}
+
+/// Ensure the plugin binary is available and executable.
+pub async fn ensure_plugin_available(plugin: &str) -> Result<()> {
+    let status = Command::new(plugin)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .with_context(|| format!("failed to exec plugin: {}", plugin))?;
+
+    if !status.success() {
+        bail!("plugin '{}' is not available (exit status={})", plugin, status);
+    }
+    Ok(())
+}
+
+/// Start V2Ray plugin wrapper (checks binary first).
+pub async fn start_v2ray_plugin(
+    plugin: &str,
+    plugin_opts: &str,
+    remote_host: &str,
+    remote_port: u16,
+) -> Result<PluginProcess> {
+    ensure_plugin_available(plugin).await?;
+    start_plugin(plugin, plugin_opts, remote_host, remote_port).await
 }
 
 /// Gracefully stop a running plugin process.
