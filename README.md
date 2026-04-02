@@ -3,7 +3,7 @@
 ## Table of Contents / Оглавление
 
 - **Специальные гайды / Special Guides:**
-  - [🔐 V2Ray Plugin Setup (DPI Evasion)](V2RAY_SETUP.md) — Полное руководство по настройке V2Ray / Complete V2Ray configuration guide
+  - [🔐 XRay Plugin Setup (DPI Evasion)](V2RAY_SETUP.md) — Полное руководство по настройке XRay / Complete XRay configuration guide
 
 - Русский
   - [Обзор](#ru-overview)
@@ -194,7 +194,7 @@ ss_method=aes-256-gcm
 
 # Обфускация (опционально)
 obfs_mode=disable
-# obfs_mode=v2ray
+# obfs_mode=xray
 # obfs_host=www.bing.com
 # ss_plugin=v2ray-plugin
 # ss_plugin_opts=server;tls;host=example.com
@@ -217,31 +217,79 @@ obfs_mode=disable
 | `ss_server_port` | Порт Shadowsocks-сервера | (обязательный при SS) |
 | `ss_password` | Пароль Shadowsocks | (обязательный при SS) |
 | `ss_method` | Шифр: `aes-128-gcm`, `aes-256-gcm`, `chacha20-ietf-poly1305` | `aes-256-gcm` |
-| `obfs_mode` | `disable`, `simple-obfs`, `v2ray` | `disable` |
+| `obfs_mode` | `disable`, `simple-obfs`, `xray` (или `v2ray` - сокращения для одного режима) | `disable` |
 | `obfs_host` | Хост для имитации при обфускации | (опционально) |
 | `ss_plugin` | Путь к бинарнику SIP003-плагина | (опционально) |
 | `ss_plugin_opts` | Опции плагина | (опционально) |
 
-#### Конфигурация V2Ray (уклонение от DPI)
+#### Конфигурация XRay (уклонение от DPI)
 
-V2Ray-плагин позволяет скрыть Shadowsocks трафик под легальный HTTPS/HTTP. Это полезно в регионах с активным DPI-фильтрованием.
+XRay-плагин позволяет скрыть Shadowsocks трафик под легальный HTTPS/HTTP. Это полезно в регионах с активным DPI-фильтрованием.
 
-**Установка v2ray-plugin:**
+**Как работает XRay плагин**
+
+XRay интегрируется в ssroute через стандарт **SIP003** (Shadowsocks Plugin Interface v0.0.3), поддерживаемый Shadowsocks:
+
+1. **Запуск плагина**: ssroute запускает процесс `xray-plugin` как отдельную программу и передаёт параметры через переменные окружения:
+   - `SS_REMOTE_HOST` — адрес реального Shadowsocks-сервера
+   - `SS_REMOTE_PORT` — порт Shadowsocks-сервера
+   - `SS_LOCAL_HOST` — локальный адрес для прослушивания (127.0.0.1)
+   - `SS_LOCAL_PORT` — свободный локальный порт
+   - `SS_PLUGIN_OPTIONS` — опции плагина (например, `server;tls;host=www.bing.com`)
+
+2. **Туннелирование трафика**:
+   - Плагин создаёт локальный сокет на `127.0.0.1:SS_LOCAL_PORT`
+   - Shadowsocks-клиент подключается к плагину вместо прямого подключения к серверу
+   - Плагин инкапсулирует Shadowsocks трафик в HTTPS/HTTP запросы
+   - Трафик выглядит как обычное веб-соединение, обходя DPI-фильтры
+   - Плагин пересылает трафик на реальный Shadowsocks-сервер
+
+3. **Типы обфускации**:
+   - **TLS режим** (`server;tls;host=...`) — трафик выглядит как HTTPS, более безопасно
+   - **HTTP режим** (`server;host=...`) — трафик выглядит как HTTP, быстрее
+   - **Выбор хоста** — используется реальный существующий домен для верификации сертификата
+
+4. **Управление процессом**:
+   - ssroute ждёт до 5 секунд, пока плагин будет готов (проверяет подключение на локальный порт)
+   - При корректном завершении ssroute отправляет SIGTERM плагину
+   - Если плагин не остановится за 5 секунд, отправляется SIGKILL
+
+**Расположение данных при использовании XRay**:
+```
+Интернет
+   ↑↓
+SS-сервер (шифрованный трафик)
+   ↑↓
+XRay-плагин (инкапсуляция в HTTPS/HTTP)
+   ↑↓
+Shadowsocks-клиент в ssroute
+   ↑↓
+TUN-интерфейс
+   ↑↓
+Маршруты (клиенты)
+```
+
+**Установка xray-plugin (v2ray-plugin):**
 
 ```bash
-# Debian/Ubuntu
-apt install v2ray-plugin
+# Debian/Ubuntu (рекомендуется)
+sudo apt install v2ray-plugin
 
-# Или вручную скачать
-wget https://github.com/shadowsocks/v2ray-plugin/releases/download/v1.3.1/v2ray-plugin-linux-amd64 -O /usr/local/bin/v2ray-plugin
-chmod +x /usr/local/bin/v2ray-plugin
+# Или вручную скачать последнюю версию
+wget https://github.com/shadowsocks/v2ray-plugin/releases/download/v1.3.2/v2ray-plugin-linux-amd64-v1.3.2.tar.gz -O /tmp/v2ray-plugin.tar.gz
+tar -xzf /tmp/v2ray-plugin.tar.gz -C /tmp
+sudo mv /tmp/v2ray-plugin /usr/local/bin/
+sudo chmod +x /usr/local/bin/v2ray-plugin
+
+# Проверить установку
+v2ray-plugin --version
 ```
 
 **Примеры конфигурации:**
 
 1. **Базовый HTTPS (TLS) режим:**
    ```
-   obfs_mode=v2ray
+   obfs_mode=xray
    obfs_host=www.bing.com
    ss_plugin=v2ray-plugin
    ss_plugin_opts=server;tls;host=www.bing.com
@@ -249,7 +297,7 @@ chmod +x /usr/local/bin/v2ray-plugin
 
 2. **HTTP режим (быстрее, менее защищен):**
    ```
-   obfs_mode=v2ray
+   obfs_mode=xray
    obfs_host=example.com
    ss_plugin=v2ray-plugin
    ss_plugin_opts=server;host=example.com
@@ -257,7 +305,7 @@ chmod +x /usr/local/bin/v2ray-plugin
 
 3. **С проверкой сертификата:**
    ```
-   obfs_mode=v2ray
+   obfs_mode=xray
    obfs_host=cloudflare.com
    ss_plugin=v2ray-plugin
    ss_plugin_opts=server;tls;host=cloudflare.com;cert=/etc/ssl/certs/ca-certificates.crt
@@ -265,11 +313,12 @@ chmod +x /usr/local/bin/v2ray-plugin
 
 **Важные замечания:**
 
-- **MTU**: Рекомендуется установить `mtu=1350` при использовании v2ray из-за накладных расходов на инкапсуляцию
+- **MTU**: Рекомендуется установить `mtu=1350` при использовании xray из-за накладных расходов на инкапсуляцию
 - **obfs_host**: Должен быть реальным доступным хостом, чтобы работала проверка сертификата TLS
 - **SIP003**: v2ray-plugin получает параметры через переменные окружения (`SS_REMOTE_HOST`, `SS_REMOTE_PORT`, `SS_LOCAL_HOST`, `SS_LOCAL_PORT`)
+- **Режимы**: ssroute поддерживает `obfs_mode=xray` и `obfs_mode=v2ray` (оба режима равноправны), а бинарник рекомендуется использовать `v2ray-plugin`
 
-Пример полной конфигурации с v2ray:
+Пример полной конфигурации с xray:
 ```
 gateway=10.0.0.1
 interface=tun2
@@ -278,7 +327,7 @@ ss_server=203.0.113.50
 ss_server_port=8388
 ss_password=your_secret_password
 ss_method=chacha20-ietf-poly1305
-obfs_mode=v2ray
+obfs_mode=xray
 obfs_host=www.bing.com
 ss_plugin=v2ray-plugin
 ss_plugin_opts=server;tls;host=www.bing.com
@@ -375,35 +424,77 @@ ping -c 3 91.108.4.1
 curl -I https://www.google.com
 ```
 
-**Диагностика V2Ray (если используется):**
+**Диагностика V2Ray/XRay плагина (если используется):**
 
-При использовании v2ray-plugin важно убедиться, что плагин работает корректно:
+При использовании xray плагина важно убедиться, что плагин работает корректно:
 
 ```bash
 # 1. Проверить наличие v2ray-plugin
 which v2ray-plugin
 v2ray-plugin --version
 
-# 2. Посмотреть логи ssroute, включая запуск v2ray
+# 2. Посмотреть логи ssroute, включая запуск плагина
 sudo journalctl -u ssroute -f
-# Должны видеть: "Plugin v2ray-plugin started (pid=...)"
+# Должны видеть: "Plugin v2ray-plugin started (pid=...)" или "Starting XRay plugin: v2ray-plugin"
 
 # 3. Проверить процесс v2ray-plugin (должен быть запущен когда ssroute работает)
 ps aux | grep v2ray-plugin
 
-# 4. Проверить сетевые соединения v2ray
+# 4. Проверить сетевые соединения
 sudo netstat -tlpn | grep v2ray
 
 # 5. Если сертификат не верифицируется, проверить наличие корневых сертификатов
 ls -la /etc/ssl/certs/ca-certificates.crt
 ```
 
-Частые проблемы с v2ray:
+Частые проблемы с xray/v2ray-plugin:
 
-- **"Plugin did not become ready"** → v2ray-plugin не запустилась, проверьте установку и права доступа
+- **"Plugin did not become ready"** → плагин не запустилась, проверьте установку и права доступа
 - **TLS handshake failed** → неверный `obfs_host` или проблемы с сертификатом
-- **Low bandwidth** → обычно нормально, v2ray добавляет накладные расходы; рассмотрите HTTP режим
+- **Low bandwidth** → обычно нормально, добавляет накладные расходы; рассмотрите HTTP режим
 - Увеличьте MTU если видите фрагментацию: установите `mtu=1350` вместо `1500`
+
+**Продвинутая отладка XRay/V2Ray**
+
+Если стандартные проверки не помогли:
+
+1. **Проверить работу плагина напрямую:**
+```bash
+# Запустить v2ray-plugin вручную с переменными окружения
+export SS_REMOTE_HOST=203.0.113.50
+export SS_REMOTE_PORT=8388
+export SS_LOCAL_HOST=127.0.0.1
+export SS_LOCAL_PORT=5555
+export SS_PLUGIN_OPTIONS="server;tls;host=www.bing.com"
+v2ray-plugin
+
+# В другом терминале проверить, слушает ли порт
+netstat -tlnp | grep :5555
+```
+
+2. **Включить подробное логирование:**
+```bash
+# Максимум информации о работе туннеля
+sudo RUST_LOG=ssroute::plugin=trace,ssroute::tunnel=debug ssroute
+
+# Или выборочно для плагина
+sudo RUST_LOG=debug ssroute 2>&1 | grep -E "plugin|xray"
+```
+
+3. **Проверить сокеты и соединения:**
+```bash
+# Все соединения от xray-plugin
+sudo lsof -p $(pgrep xray-plugin)
+
+# Мониторить трафик в реальном времени
+sudo tcpdump -i lo -n "port 5555"  # для локального сокета
+```
+
+4. **Проверить переменные окружения плагина:**
+```bash
+# Посмотреть, какие переменные передал ssroute
+ps auxe | grep xray-plugin
+```
 
 <a id="ru-debugging"></a>
 ### Логирование и отладка
@@ -599,7 +690,7 @@ ss_method=aes-256-gcm
 
 # Obfuscation (optional)
 obfs_mode=disable
-# obfs_mode=v2ray
+# obfs_mode=xray
 # obfs_host=www.bing.com
 # ss_plugin=v2ray-plugin
 # ss_plugin_opts=server;tls;host=example.com
@@ -622,31 +713,79 @@ obfs_mode=disable
 | `ss_server_port` | Shadowsocks server port | (required if SS enabled) |
 | `ss_password` | Shadowsocks password | (required if SS enabled) |
 | `ss_method` | Cipher: `aes-128-gcm`, `aes-256-gcm`, `chacha20-ietf-poly1305` | `aes-256-gcm` |
-| `obfs_mode` | `disable`, `simple-obfs`, `v2ray` | `disable` |
+| `obfs_mode` | `disable`, `simple-obfs`, `xray` (or `v2ray` - aliases for the same mode) | `disable` |
 | `obfs_host` | Host to impersonate for obfuscation | (optional) |
 | `ss_plugin` | Path to SIP003 plugin binary | (optional) |
 | `ss_plugin_opts` | Plugin options string | (optional) |
 
-#### V2Ray Configuration (DPI Evasion)
+#### XRay Configuration (DPI Evasion)
 
-The V2Ray plugin tunnels Shadowsocks traffic through legitimate HTTPS/HTTP connections, bypassing DPI filters in restrictive regions.
+The XRay plugin tunnels Shadowsocks traffic through legitimate HTTPS/HTTP connections, bypassing DPI filters in restrictive regions.
 
-**Installing v2ray-plugin:**
+**How the XRay Plugin Works**
+
+XRay integrates into ssroute through the **SIP003** standard (Shadowsocks Plugin Interface v0.0.3), supported by Shadowsocks:
+
+1. **Plugin Startup**: ssroute launches the `xray-plugin` process as a separate program and passes parameters via environment variables:
+   - `SS_REMOTE_HOST` — address of the actual Shadowsocks server
+   - `SS_REMOTE_PORT` — port of the Shadowsocks server
+   - `SS_LOCAL_HOST` — local address to listen on (127.0.0.1)
+   - `SS_LOCAL_PORT` — a free ephemeral local port
+   - `SS_PLUGIN_OPTIONS` — plugin options (e.g., `server;tls;host=www.bing.com`)
+
+2. **Traffic Tunneling**:
+   - The plugin creates a local socket listening on `127.0.0.1:SS_LOCAL_PORT`
+   - The Shadowsocks client connects to the plugin instead of the server directly
+   - The plugin encapsulates Shadowsocks traffic inside HTTPS/HTTP requests
+   - Traffic appears as normal web traffic, evading DPI detection
+   - The plugin relays encrypted traffic to the real Shadowsocks server
+
+3. **Obfuscation Modes**:
+   - **TLS mode** (`server;tls;host=...`) — traffic looks like HTTPS, more secure
+   - **HTTP mode** (`server;host=...`) — traffic looks like HTTP, faster
+   - **Host selection** — uses a real existing domain for certificate verification
+
+4. **Process Management**:
+   - ssroute waits up to 5 seconds for the plugin to become ready (tests TCP connection)
+   - On graceful shutdown, ssroute sends SIGTERM to the plugin
+   - If the plugin doesn't stop within 5 seconds, SIGKILL is sent
+
+**Data Flow with XRay**:
+```
+Internet
+   ↑↓
+SS Server (encrypted traffic)
+   ↑↓
+XRay Plugin (encapsulated in HTTPS/HTTP)
+   ↑↓
+Shadowsocks Client in ssroute
+   ↑↓
+TUN Interface
+   ↑↓
+Routes (client devices)
+```
+
+**Installing xray-plugin (v2ray-plugin):**
 
 ```bash
-# Debian/Ubuntu
-apt install v2ray-plugin
+# Debian/Ubuntu (recommended)
+sudo apt install v2ray-plugin
 
-# Or download manually
-wget https://github.com/shadowsocks/v2ray-plugin/releases/download/v1.3.1/v2ray-plugin-linux-amd64 -O /usr/local/bin/v2ray-plugin
-chmod +x /usr/local/bin/v2ray-plugin
+# Or download manually from official releases
+wget https://github.com/shadowsocks/v2ray-plugin/releases/download/v1.3.2/v2ray-plugin-linux-amd64-v1.3.2.tar.gz -O /tmp/v2ray-plugin.tar.gz
+tar -xzf /tmp/v2ray-plugin.tar.gz -C /tmp
+sudo mv /tmp/v2ray-plugin /usr/local/bin/
+sudo chmod +x /usr/local/bin/v2ray-plugin
+
+# Verify installation
+v2ray-plugin --version
 ```
 
 **Configuration Examples:**
 
 1. **Basic HTTPS (TLS) mode:**
    ```
-   obfs_mode=v2ray
+   obfs_mode=xray
    obfs_host=www.bing.com
    ss_plugin=v2ray-plugin
    ss_plugin_opts=server;tls;host=www.bing.com
@@ -654,7 +793,7 @@ chmod +x /usr/local/bin/v2ray-plugin
 
 2. **HTTP mode (faster, less secure):**
    ```
-   obfs_mode=v2ray
+   obfs_mode=xray
    obfs_host=example.com
    ss_plugin=v2ray-plugin
    ss_plugin_opts=server;host=example.com
@@ -662,7 +801,7 @@ chmod +x /usr/local/bin/v2ray-plugin
 
 3. **With certificate verification:**
    ```
-   obfs_mode=v2ray
+   obfs_mode=xray
    obfs_host=cloudflare.com
    ss_plugin=v2ray-plugin
    ss_plugin_opts=server;tls;host=cloudflare.com;cert=/etc/ssl/certs/ca-certificates.crt
@@ -670,11 +809,12 @@ chmod +x /usr/local/bin/v2ray-plugin
 
 **Important Notes:**
 
-- **MTU**: Set `mtu=1350` when using v2ray due to encapsulation overhead
+- **MTU**: Set `mtu=1350` when using xray due to encapsulation overhead
 - **obfs_host**: Must be a real accessible host for TLS certificate verification to work
 - **SIP003**: v2ray-plugin receives parameters via environment variables (`SS_REMOTE_HOST`, `SS_REMOTE_PORT`, `SS_LOCAL_HOST`, `SS_LOCAL_PORT`)
+- **Modes**: ssroute supports both `obfs_mode=xray` and `obfs_mode=v2ray` (equivalent), but the recommended binary is `v2ray-plugin` from the official Shadowsocks project
 
-Full configuration example with v2ray:
+Full configuration example with xray:
 ```
 gateway=10.0.0.1
 interface=tun2
@@ -683,7 +823,7 @@ ss_server=203.0.113.50
 ss_server_port=8388
 ss_password=your_secret_password
 ss_method=chacha20-ietf-poly1305
-obfs_mode=v2ray
+obfs_mode=xray
 obfs_host=www.bing.com
 ss_plugin=v2ray-plugin
 ss_plugin_opts=server;tls;host=www.bing.com
@@ -780,35 +920,77 @@ If the route for this IP goes through the TUN interface (listed in `data/`), the
 curl -I https://www.google.com
 ```
 
-**V2Ray Diagnostics (if used):**
+**V2Ray/XRay Plugin Diagnostics (if used):**
 
-When using the v2ray-plugin, verify it works correctly:
+When using the xray plugin, verify the plugin is working correctly:
 
 ```bash
 # 1. Check v2ray-plugin is available
 which v2ray-plugin
 v2ray-plugin --version
 
-# 2. Check ssroute logs, including v2ray startup
+# 2. Check ssroute logs, including plugin startup
 sudo journalctl -u ssroute -f
-# Should see: "Plugin v2ray-plugin started (pid=...)"
+# Should see: "Plugin v2ray-plugin started (pid=...)" or "Starting XRay plugin: v2ray-plugin"
 
 # 3. Verify v2ray-plugin process is running (when ssroute is active)
 ps aux | grep v2ray-plugin
 
-# 4. Check network connections for v2ray
+# 4. Check network connections
 sudo netstat -tlpn | grep v2ray
 
 # 5. If certificate verification fails, check CA certificates
 ls -la /etc/ssl/certs/ca-certificates.crt
 ```
 
-Common V2Ray issues:
+Common XRay/V2Ray issues:
 
-- **"Plugin did not become ready"** → v2ray-plugin won't start; check installation and permissions
+- **"Plugin did not become ready"** → plugin won't start; check installation and permissions
 - **TLS handshake failed** → wrong `obfs_host` or certificate issues
 - **Low bandwidth** → normal overhead; consider HTTP mode instead of TLS
 - If you see packet fragmentation, lower MTU: set `mtu=1350` instead of `1500`
+
+**Advanced XRay/V2Ray Debugging**
+
+If standard checks don't resolve the issue:
+
+1. **Test the plugin directly:**
+```bash
+# Run v2ray-plugin manually with environment variables
+export SS_REMOTE_HOST=203.0.113.50
+export SS_REMOTE_PORT=8388
+export SS_LOCAL_HOST=127.0.0.1
+export SS_LOCAL_PORT=5555
+export SS_PLUGIN_OPTIONS="server;tls;host=www.bing.com"
+v2ray-plugin
+
+# In another terminal, verify the port is listening
+netstat -tlnp | grep :5555
+```
+
+2. **Enable verbose logging:**
+```bash
+# Maximum information about tunnel operation
+sudo RUST_LOG=ssroute::plugin=trace,ssroute::tunnel=debug ssroute
+
+# Or filter just plugin-related output
+sudo RUST_LOG=debug ssroute 2>&1 | grep -E "plugin|xray"
+```
+
+3. **Inspect sockets and connections:**
+```bash
+# All connections from the xray-plugin process
+sudo lsof -p $(pgrep xray-plugin)
+
+# Monitor local traffic in real-time
+sudo tcpdump -i lo -n "port 5555"  # local socket
+```
+
+4. **Verify plugin environment variables:**
+```bash
+# See what ssroute passed to the plugin
+ps auxe | grep xray-plugin
+```
 
 <a id="en-debugging"></a>
 ### Logging and Debugging
