@@ -11,7 +11,7 @@ const DEFAULT_MTU: u16 = 1500;
 pub enum ObfsMode {
     Disable,
     SimpleObfs,
-    V2ray,
+    Xray,
 }
 
 #[derive(Debug, Clone)]
@@ -129,7 +129,7 @@ pub fn read_config(path: &Path) -> Result<Config> {
                 config.obfs_mode = match value {
                     "disable" | "" => ObfsMode::Disable,
                     "simple-obfs" => ObfsMode::SimpleObfs,
-                    "v2ray" => ObfsMode::V2ray,
+                    "v2ray" | "xray" => ObfsMode::Xray,
                     _ => bail!("unknown obfs_mode: {value}"),
                 };
             }
@@ -194,9 +194,9 @@ mod tests {
              ss_server_port=8388\n\
              ss_password=secret\n\
              ss_method=chacha20-ietf-poly1305\n\
-             obfs_mode=v2ray\n\
+             obfs_mode=xray\n\
              obfs_host=www.bing.com\n\
-             ss_plugin=v2ray-plugin\n\
+             ss_plugin=xray-plugin\n\
              ss_plugin_opts=server;tls;host=example.com\n",
         );
         let config = read_config(f.path()).unwrap();
@@ -211,9 +211,9 @@ mod tests {
         assert_eq!(config.ss_server_port, 8388);
         assert_eq!(config.ss_password, "secret");
         assert_eq!(config.ss_method, "chacha20-ietf-poly1305");
-        assert_eq!(config.obfs_mode, ObfsMode::V2ray);
+        assert_eq!(config.obfs_mode, ObfsMode::Xray);
         assert_eq!(config.obfs_host, "www.bing.com");
-        assert_eq!(config.ss_plugin, "v2ray-plugin");
+        assert_eq!(config.ss_plugin, "xray-plugin");
         assert_eq!(config.ss_plugin_opts, "server;tls;host=example.com");
     }
 

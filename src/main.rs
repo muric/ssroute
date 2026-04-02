@@ -140,17 +140,20 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
     let mut plugin_process = None;
 
     match config.obfs_mode {
-        ObfsMode::V2ray => {
+        ObfsMode::Xray => {
             if config.ss_plugin.is_empty() {
-                bail!("obfs_mode=v2ray but ss_plugin is not set");
+                bail!("obfs_mode=xray but ss_plugin is not set");
             }
-            let p = plugin::start_plugin(
+            tracing::info!("Starting XRay plugin: {}", config.ss_plugin);
+            let p = plugin::start_xray_plugin(
                 &config.ss_plugin,
                 &config.ss_plugin_opts,
                 &config.ss_server,
                 config.ss_server_port,
             )
-            .await?;
+            .await
+            .with_context(|| format!("failed to start xray plugin '{}'", config.ss_plugin))?;
+
             let parts: Vec<&str> = p.local_addr.split(':').collect();
             if parts.len() == 2 {
                 config.ss_server = parts[0].to_string();

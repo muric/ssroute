@@ -57,22 +57,66 @@ ss_method=aes-256-gcm
 #   disable     - no obfuscation, direct SS connection (default)
 #   simple-obfs - built-in HTTP/TLS obfuscation (not implemented yet)
 #   v2ray       - V2Ray plugin via SIP003 protocol (external binary)
+# 
+# When set to v2ray, ssroute will:
+# 1. Start the v2ray-plugin process with SIP003 environment variables
+# 2. Plugin creates local tunnel and forwards to SS server with obfuscation
+# 3. SS proxy connects through the plugin's local port
+# 4. Result: DPI sees normal HTTPS/HTTP traffic, not SS protocol
 obfs_mode=disable
 
 # Host to impersonate when obfuscation is enabled.
 # DPI will see traffic as if it goes to this host.
 # Used by both simple-obfs and v2ray modes.
 # Example: www.bing.com, cloudflare.com
-obfs_host=
+obfs_host=www.bing.com
 
-# ---- V2Ray plugin (only when obfs_mode=v2ray) ----
+# ---- XRay Plugin Configuration (only when obfs_mode=xray) ----
+# 
+# The XRay plugin provides DPI evasion by tunneling SS traffic through
+# legitimate-looking HTTPS/HTTP traffic. It's a SIP003-compatible plugin
+# that works with any SS implementation.
+#
+# Installation on Linux:
+#   1. Install xray-plugin binary
+#      Ubuntu/Debian: apt install xray-plugin
+#      Or download: https://github.com/teddysun/xray-plugin/releases
+#   2. Ensure it's in PATH or specify full path below
+#
+# Requirements:
+#   - xray-plugin binary (external, not included)
+#   - Valid obfs_host for TLS certificate verification
+#   - Consider lowering MTU to ~1350 if experiencing issues
+
 # Path or name of the SIP003-compatible plugin binary.
-# Example: v2ray-plugin, /usr/local/bin/v2ray-plugin
-ss_plugin=v2ray-plugin
+# The plugin must support SIP003 protocol environment variables.
+# Examples:
+#   xray-plugin                       (if in PATH)
+#   /usr/bin/xray-plugin              (absolute path)
+#   /usr/local/bin/xray-plugin        (custom installation)
+ss_plugin=xray-plugin
 
-# Plugin options string (passed via SS_PLUGIN_OPTIONS env).
-# Example: server;tls;host=example.com
-ss_plugin_opts=
+# Plugin options string (passed via SS_PLUGIN_OPTIONS env to the plugin).
+# Format: semicolon-separated key=value pairs
+# Common modes:
+#   
+#   HTTP obfuscation (faster, less secure):
+#     server;host=example.com
+#
+#   HTTPS/TLS obfuscation (slower, DPI-resistant):
+#     server;tls;host=example.com
+#
+#   HTTPS with specific certificate verification:
+#     server;tls;host=example.com;cert=path/to/cert.pem
+#
+# Full options documentation:
+#   https://github.com/teddysun/xray-plugin#usage
+#
+# Examples:
+#   ss_plugin_opts=server;tls;host=www.bing.com
+#   ss_plugin_opts=server;host=cloudflare.com
+#   ss_plugin_opts=server;tls;host=example.com;cert=/etc/ssl/certs/ca-certificates.crt
+ss_plugin_opts=server;tls;host=www.bing.com
 
 # ---- TUN MTU ----
 # MTU size for TUN interface.
