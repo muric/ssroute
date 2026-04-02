@@ -80,8 +80,8 @@ pub async fn ensure_plugin_available(plugin: &str) -> Result<()> {
     Ok(())
 }
 
-/// Start V2Ray plugin wrapper (checks binary first).
-pub async fn start_v2ray_plugin(
+/// Start SIP003 plugin wrapper (checks binary first).
+pub async fn start_sip003_plugin(
     plugin: &str,
     plugin_opts: &str,
     remote_host: &str,
@@ -89,6 +89,16 @@ pub async fn start_v2ray_plugin(
 ) -> Result<PluginProcess> {
     ensure_plugin_available(plugin).await?;
     start_plugin(plugin, plugin_opts, remote_host, remote_port).await
+}
+
+/// Start XRay plugin specifically (alias for SIP003 wrapper).
+pub async fn start_xray_plugin(
+    plugin: &str,
+    plugin_opts: &str,
+    remote_host: &str,
+    remote_port: u16,
+) -> Result<PluginProcess> {
+    start_sip003_plugin(plugin, plugin_opts, remote_host, remote_port).await
 }
 
 /// Gracefully stop a running plugin process.
