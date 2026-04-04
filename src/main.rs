@@ -169,11 +169,7 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
 
     let ss_config = tunnel::build_ss_config(&config)?;
 
-    let service_handle = tokio::spawn(async move {
-        if let Err(e) = tunnel::run_service(ss_config).await {
-            tracing::error!("SS service error: {e}");
-        }
-    });
+    let mut service_handle = tokio::spawn(async move { tunnel::run_service(ss_config).await });
 
     tracing::info!("Waiting for TUN interface '{}' to come up...", config.interface);
     wait_for_interface(&config.interface).await;
@@ -218,17 +214,40 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
-    tokio::select! {
-        _ = sigint.recv() => tracing::info!("Received SIGINT, shutting down..."),
-        _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down..."),
-        _ = service_handle => tracing::error!("SS service exited unexpectedly"),
-    }
+    let result = tokio::select! {
+        _ = sigint.recv() => {
+            tracing::info!("Received SIGINT, shutting down...");
+            service_handle.abort();
+            Ok(())
+        }
+        _ = sigterm.recv() => {
+            tracing::info!("Received SIGTERM, shutting down...");
+            service_handle.abort();
+            Ok(())
+        }
+        result = &mut service_handle => {
+            match result {
+                Ok(Ok(())) => {
+                    tracing::warn!("SS service exited");
+                    Ok(())
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("SS service error: {e}");
+                    Err(e)
+                }
+                Err(e) => {
+                    tracing::error!("SS service task panicked: {e}");
+                    Err(anyhow::anyhow!("SS service task panicked: {e}"))
+                }
+            }
+        }
+    };
 
     if let Some(mut p) = plugin_process {
         plugin::stop_plugin(&mut p).await;
     }
 
-    Ok(())
+    result
 }
 
 /// Add routes from data/ and default_route/ relative to config_dir.
