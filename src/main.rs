@@ -228,8 +228,8 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
         result = &mut service_handle => {
             match result {
                 Ok(Ok(())) => {
-                    tracing::error!("SS service exited cleanly but should run continuously; treating as a failure");
-                    Err(anyhow::anyhow!("SS service exited cleanly but should run continuously"))
+                    tracing::warn!("SS service exited");
+                    Ok(())
                 }
                 Ok(Err(e)) => {
                     tracing::error!("SS service error: {e}");
