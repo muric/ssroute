@@ -169,11 +169,12 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
 
     let ss_config = tunnel::build_ss_config(&config)?;
 
-    let service_handle = tokio::spawn(async move {
-        if let Err(e) = tunnel::run_service(ss_config).await {
-            tracing::error!("SS service error: {e}");
-        }
-    });
+    // Track when we spawned the service so we can decide whether to reset the
+    // consecutive-failure counter (a service that ran for a long time before
+    // crashing is treated as a "fresh" failure).
+    let mut service_spawn_time = std::time::Instant::now();
+    let mut current_handle: tokio::task::JoinHandle<anyhow::Result<()>> =
+        tokio::spawn(async move { tunnel::run_service(ss_config).await });
 
     tracing::info!("Waiting for TUN interface '{}' to come up...", config.interface);
     wait_for_interface(&config.interface).await;
@@ -218,14 +219,108 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
-    tokio::select! {
-        _ = sigint.recv() => tracing::info!("Received SIGINT, shutting down..."),
-        _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down..."),
-        _ = service_handle => tracing::error!("SS service exited unexpectedly"),
+    // How many times in a row the SS service has crashed without running long
+    // enough to be considered stable.
+    const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+    // A service that runs for at least this many seconds before crashing is
+    // considered stable; the consecutive-failure counter is reset.
+    const RESTART_THRESHOLD_SECS: u64 = 60;
+    // Base delay between restart attempts; doubles with each consecutive failure
+    // (capped at 5 * 2^4 = 80 s).
+    const BASE_RESTART_DELAY_SECS: u64 = 5;
+
+    let mut consecutive_failures: u32 = 0;
+    // If the loop exits because the service failed too many times, this holds
+    // the error to be returned after plugin clean-up.
+    let mut failure_reason: Option<anyhow::Error> = None;
+
+    loop {
+        tokio::select! {
+            _ = sigint.recv() => {
+                tracing::info!("Received SIGINT, shutting down...");
+                current_handle.abort();
+                break;
+            }
+            _ = sigterm.recv() => {
+                tracing::info!("Received SIGTERM, shutting down...");
+                current_handle.abort();
+                break;
+            }
+            result = &mut current_handle => {
+                match result {
+                    Ok(Ok(())) => tracing::warn!("SS service exited cleanly but unexpectedly"),
+                    Ok(Err(ref e)) => tracing::error!("SS service error: {e}"),
+                    Err(ref e) => tracing::error!("SS service task failed: {e}"),
+                }
+            }
+        }
+
+        // ── We reach here only when the service crashed.  Signal-handler arms
+        // above call `break`, which exits the loop entirely and skips this code. ──
+
+        // Reset failure count if the service was stable long enough.
+        if service_spawn_time.elapsed().as_secs() >= RESTART_THRESHOLD_SECS {
+            consecutive_failures = 0;
+        }
+        consecutive_failures += 1;
+
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+            tracing::error!(
+                "SS service failed {} consecutive times; exiting so that systemd can restart the daemon",
+                consecutive_failures
+            );
+            failure_reason = Some(anyhow::anyhow!(
+                "SS service failed {} consecutive times",
+                consecutive_failures
+            ));
+            break;
+        }
+
+        let delay_secs =
+            BASE_RESTART_DELAY_SECS.saturating_mul(2u64.pow((consecutive_failures - 1).min(4)));
+        tracing::warn!(
+            "SS service crashed (failure {}/{}); restarting in {}s...",
+            consecutive_failures,
+            MAX_CONSECUTIVE_FAILURES,
+            delay_secs
+        );
+
+        // Wait out the back-off delay, but still honour shutdown signals.
+        tokio::select! {
+            _ = sigint.recv() => {
+                tracing::info!("Received SIGINT during restart delay, shutting down...");
+                break;
+            }
+            _ = sigterm.recv() => {
+                tracing::info!("Received SIGTERM during restart delay, shutting down...");
+                break;
+            }
+            _ = tokio::time::sleep(Duration::from_secs(delay_secs)) => {}
+        }
+
+        tracing::info!(
+            "Restarting SS service (attempt {}/{})...",
+            consecutive_failures + 1,
+            MAX_CONSECUTIVE_FAILURES
+        );
+        let ss_config = match tunnel::build_ss_config(&config) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to build SS config for restart: {e}");
+                failure_reason = Some(e);
+                break;
+            }
+        };
+        service_spawn_time = std::time::Instant::now();
+        current_handle = tokio::spawn(async move { tunnel::run_service(ss_config).await });
     }
 
     if let Some(mut p) = plugin_process {
         plugin::stop_plugin(&mut p).await;
+    }
+
+    if let Some(e) = failure_reason {
+        return Err(e);
     }
 
     Ok(())
