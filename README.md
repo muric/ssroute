@@ -2,9 +2,6 @@
 
 ## Table of Contents / Оглавление
 
-- **Специальные гайды / Special Guides:**
-  - [🔐 XRay Plugin Setup (DPI Evasion)](V2RAY_SETUP.md) — Полное руководство по настройке XRay / Complete XRay configuration guide
-
 - Русский
   - [Обзор](#ru-overview)
   - [Как это работает](#ru-how-it-works)
@@ -209,7 +206,7 @@ obfs_mode=disable
 | `interface` | Имя TUN-интерфейса (например `tun2`) | (обязательный) |
 | `default_gw` | Шлюз (IPv4 или IPv6) для маршрутов из `default_route/` | (опционально) |
 | `default_interface` | Интерфейс для маршрутов из `default_route/` | (опционально) |
-| `concurrency` | Количество параллельных воркеров для загрузки маршрутов | `4` |
+| `concurrency`, `goroutine_count` | Количество параллельных воркеров для загрузки маршрутов | `4` |
 | `debug` | Подробное логирование ошибок маршрутизации | `false` |
 | `mtu` | MTU для TUN-интерфейса (0 = авто 1500) | `0` |
 | `ss_enabled` | Включить daemon-режим с Shadowsocks | `false` |
@@ -221,6 +218,15 @@ obfs_mode=disable
 | `obfs_host` | Хост для имитации при обфускации | (опционально) |
 | `ss_plugin` | Путь к бинарнику SIP003-плагина | (опционально) |
 | `ss_plugin_opts` | Опции плагина | (опционально) |
+
+#### Интеграция с NetworkManager и systemd-networkd
+
+ssroute интегрируется с NetworkManager и systemd-networkd для предотвращения конфликтов с TUN-интерфейсом:
+
+- **systemd-networkd**: Создаёт `/etc/systemd/network/99-ssroute.network` с `Unmanaged=yes` чтобы интерфейс не управлялся
+- **NetworkManager**: Использует D-Bus для помечания TUN-интерфейса как неуправляемого, обеспечивая что NetworkManager не модифицирует и не переопределяет конфигурацию интерфейса
+
+Эта интеграция автоматическая и не требует дополнительной настройки.
 
 #### Конфигурация XRay (уклонение от DPI)
 
@@ -705,7 +711,7 @@ obfs_mode=disable
 | `interface` | TUN interface name (e.g. `tun2`) | (required) |
 | `default_gw` | Gateway (IPv4 or IPv6) for routes in `default_route/` dir | (optional) |
 | `default_interface` | Interface for routes in `default_route/` dir | (optional) |
-| `concurrency` | Parallel workers for route loading | `4` |
+| `concurrency`, `goroutine_count` | Parallel workers for route loading | `4` |
 | `debug` | Verbose error logging for routes | `false` |
 | `mtu` | TUN MTU (0 = auto 1500) | `0` |
 | `ss_enabled` | Enable Shadowsocks daemon mode | `false` |
@@ -717,6 +723,15 @@ obfs_mode=disable
 | `obfs_host` | Host to impersonate for obfuscation | (optional) |
 | `ss_plugin` | Path to SIP003 plugin binary | (optional) |
 | `ss_plugin_opts` | Plugin options string | (optional) |
+
+#### NetworkManager and systemd-networkd Integration
+
+ssroute integrates with NetworkManager and systemd-networkd to prevent interference with the TUN interface:
+
+- **systemd-networkd**: Creates `/etc/systemd/network/99-ssroute.network` with `Unmanaged=yes` to keep the interface from being managed
+- **NetworkManager**: Uses D-Bus to mark the TUN interface as unmanaged, ensuring NetworkManager does not modify or override the interface configuration
+
+This integration is automatic and does not require any additional configuration.
 
 #### XRay Configuration (DPI Evasion)
 
