@@ -4,11 +4,11 @@ mod route;
 mod tun;
 mod tunnel;
 
+use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::time::sleep;
 use zbus::{Connection, Proxy};
-use std::error::Error;
 
 use anyhow::{bail, Context, Result};
 use config::ObfsMode;
@@ -116,7 +116,13 @@ async fn run_oneshot_mode(config: &config::Config, config_dir: &Path) -> Result<
     tun::create_tun(&config.interface, true)?;
 
     tracing::info!("Setting gateway IP and MTU={} on TUN interface", config.mtu);
-    tun::configure_tun(&config.interface, &config.gateway, &config.gateway6, config.mtu).await?;
+    tun::configure_tun(
+        &config.interface,
+        &config.gateway,
+        &config.gateway6,
+        config.mtu,
+    )
+    .await?;
 
     add_routes(config, config_dir).await;
 
@@ -164,17 +170,32 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
 
     let mut service_handle = tokio::spawn(async move { tunnel::run_service(ss_config).await });
 
-    tracing::info!("Waiting for TUN interface '{}' to come up...", config.interface);
+    tracing::info!(
+        "Waiting for TUN interface '{}' to come up...",
+        config.interface
+    );
     wait_for_interface(&config.interface).await;
-    
+
     if let Err(e) = setup_unmanaged_interface(&config.interface).await {
         eprintln!("NetworkManager integration error: {}", e);
     }
 
     // Configure TUN interface: assign IP addresses and MTU
-    tracing::info!("Configuring TUN interface {} with gateway={}, gateway6={}, mtu={}", 
-        config.interface, config.gateway, config.gateway6, config.mtu);
-    if let Err(e) = tun::configure_tun(&config.interface, &config.gateway, &config.gateway6, config.mtu).await {
+    tracing::info!(
+        "Configuring TUN interface {} with gateway={}, gateway6={}, mtu={}",
+        config.interface,
+        config.gateway,
+        config.gateway6,
+        config.mtu
+    );
+    if let Err(e) = tun::configure_tun(
+        &config.interface,
+        &config.gateway,
+        &config.gateway6,
+        config.mtu,
+    )
+    .await
+    {
         tracing::warn!("Failed to configure TUN interface: {e}");
     }
 
@@ -183,7 +204,7 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
             tracing::warn!("Failed to set MTU (backup): {e}");
         }
     }
-    
+
     add_routes(&config, config_dir).await;
 
     tracing::info!("Daemon running!!!");
@@ -231,16 +252,42 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
 async fn add_routes(config: &config::Config, config_dir: &Path) {
     if !config.interface.is_empty() && (!config.gateway.is_empty() || !config.gateway6.is_empty()) {
         let dir = config_dir.join("data");
-        tracing::info!("Adding routes for interface: {} from {}", config.interface, dir.display());
-        if let Err(e) = route::add_routes_from_dir(&dir, &config.gateway, &config.gateway6, &config.interface, config.concurrency, config.debug).await {
+        tracing::info!(
+            "Adding routes for interface: {} from {}",
+            config.interface,
+            dir.display()
+        );
+        if let Err(e) = route::add_routes_from_dir(
+            &dir,
+            &config.gateway,
+            &config.gateway6,
+            &config.interface,
+            config.concurrency,
+            config.debug,
+        )
+        .await
+        {
             tracing::error!("Error adding routes: {e}");
         }
     }
 
     if !config.default_interface.is_empty() && !config.default_gateway.is_empty() {
         let dir = config_dir.join("default_route");
-        tracing::info!("Adding routes for default interface: {} from {}", config.default_interface, dir.display());
-        if let Err(e) = route::add_routes_from_dir(&dir, &config.default_gateway, "", &config.default_interface, config.concurrency, config.debug).await {
+        tracing::info!(
+            "Adding routes for default interface: {} from {}",
+            config.default_interface,
+            dir.display()
+        );
+        if let Err(e) = route::add_routes_from_dir(
+            &dir,
+            &config.default_gateway,
+            "",
+            &config.default_interface,
+            config.concurrency,
+            config.debug,
+        )
+        .await
+        {
             tracing::error!("Error adding default routes: {e}");
         }
     }
@@ -370,7 +417,10 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
         }
     }
 
-    let path = device_path.ok_or(format!("Timeout: NM did not recognize {} within 3s", iface_name))?;
+    let path = device_path.ok_or(format!(
+        "Timeout: NM did not recognize {} within 3s",
+        iface_name
+    ))?;
 
     // 5. Create proxy for the specific device and set 'Managed' to false
     let device_proxy = Proxy::new(
@@ -384,7 +434,10 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
     // Note: set_property handles the type wrapping automatically
     device_proxy.set_property("Managed", false).await?;
 
-    println!("Interface {} is now UNMANAGED by NetworkManager.", iface_name);
+    println!(
+        "Interface {} is now UNMANAGED by NetworkManager.",
+        iface_name
+    );
     Ok(())
 }
 
@@ -396,17 +449,15 @@ async fn is_nm_running(conn: &Connection) -> bool {
         "/org/freedesktop/DBus",
         "org.freedesktop.DBus",
     )
-    .await {
+    .await
+    {
         Ok(p) => p,
         Err(_) => return false,
     };
 
     // zbus 4.x call syntax: <MethodName, BodyTuple, ReturnType>
     dbus_proxy
-        .call::<&str, (&str,), bool>(
-            "NameHasOwner",
-            &("org.freedesktop.NetworkManager",),
-        )
+        .call::<&str, (&str,), bool>("NameHasOwner", &("org.freedesktop.NetworkManager",))
         .await
         .unwrap_or(false)
 }

@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use futures::stream::{self, StreamExt};
 use futures::TryStreamExt;
 
@@ -220,13 +220,21 @@ pub async fn add_routes_from_dir(
     })?;
 
     let gw: Option<IpAddr> = if !gateway.is_empty() {
-        Some(gateway.parse().with_context(|| format!("invalid gateway IP: {gateway}"))?)
+        Some(
+            gateway
+                .parse()
+                .with_context(|| format!("invalid gateway IP: {gateway}"))?,
+        )
     } else {
         None
     };
 
     let gw6: Option<IpAddr> = if !gateway6.is_empty() {
-        Some(gateway6.parse().with_context(|| format!("invalid gateway6 IP: {gateway6}"))?)
+        Some(
+            gateway6
+                .parse()
+                .with_context(|| format!("invalid gateway6 IP: {gateway6}"))?,
+        )
     } else {
         None
     };
@@ -300,10 +308,13 @@ pub async fn add_routes_from_dir(
                     // For IPv6 on TUN interfaces, don't use gateway if it's assigned to the interface itself
                     // TUN interfaces need interface-only routes
                     if iface_name.contains("tun") {
-                        tracing::debug!("TUN interface detected, using interface-only IPv6 route for {dest}");
+                        tracing::debug!(
+                            "TUN interface detected, using interface-only IPv6 route for {dest}"
+                        );
                         None
                     } else {
-                        gw6.filter(|g| g.is_ipv6()).or_else(|| gw.filter(|g| g.is_ipv6()))
+                        gw6.filter(|g| g.is_ipv6())
+                            .or_else(|| gw.filter(|g| g.is_ipv6()))
                     }
                 };
 

@@ -72,8 +72,8 @@ pub fn create_tun(name: &str, persistent: bool) -> Result<Option<OwnedFd>> {
 
 /// Configure TUN interface: assign IP addresses (gateway/24 and gateway6/64), set MTU, bring up.
 pub async fn configure_tun(name: &str, gateway: &str, gateway6: &str, mtu: u16) -> Result<()> {
-    let (connection, handle, _) = rtnetlink::new_connection()
-        .context("create netlink connection")?;
+    let (connection, handle, _) =
+        rtnetlink::new_connection().context("create netlink connection")?;
     let _conn = tokio::spawn(connection);
 
     // Find link by name
@@ -94,11 +94,7 @@ pub async fn configure_tun(name: &str, gateway: &str, gateway6: &str, mtu: u16) 
         if !addr.is_ipv4() {
             bail!("gateway must be IPv4 address: {gateway}");
         }
-        let result = handle
-            .address()
-            .add(index, addr, 24)
-            .execute()
-            .await;
+        let result = handle.address().add(index, addr, 24).execute().await;
 
         match result {
             Ok(()) => {}
@@ -121,11 +117,7 @@ pub async fn configure_tun(name: &str, gateway: &str, gateway6: &str, mtu: u16) 
         if !addr.is_ipv6() {
             bail!("gateway6 must be IPv6 address: {gateway6}");
         }
-        let result = handle
-            .address()
-            .add(index, addr, 64)
-            .execute()
-            .await;
+        let result = handle.address().add(index, addr, 64).execute().await;
 
         match result {
             Ok(()) => {}

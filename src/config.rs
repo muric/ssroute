@@ -105,8 +105,8 @@ pub fn read_config(path: &Path) -> Result<Config> {
                     .with_context(|| format!("invalid concurrency value '{value}'"))?;
             }
             "debug" => {
-                config.debug = parse_bool(value)
-                    .with_context(|| format!("invalid debug value '{value}'"))?;
+                config.debug =
+                    parse_bool(value).with_context(|| format!("invalid debug value '{value}'"))?;
             }
             "mtu" => {
                 config.mtu = value
