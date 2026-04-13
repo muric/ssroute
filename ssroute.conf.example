@@ -56,10 +56,11 @@ ss_method=aes-256-gcm
 # Values:
 #   disable     - no obfuscation, direct SS connection (default)
 #   simple-obfs - built-in HTTP/TLS obfuscation (not implemented yet)
-#   v2ray       - V2Ray plugin via SIP003 protocol (external binary)
+#   xray        - XRay/V2Ray plugin via SIP003 protocol (external binary)
+#   v2ray       - alias for xray (both values are identical)
 # 
-# When set to v2ray, ssroute will:
-# 1. Start the v2ray-plugin process with SIP003 environment variables
+# When set to xray (or v2ray), ssroute will:
+# 1. Start the plugin process with SIP003 environment variables
 # 2. Plugin creates local tunnel and forwards to SS server with obfuscation
 # 3. SS proxy connects through the plugin's local port
 # 4. Result: DPI sees normal HTTPS/HTTP traffic, not SS protocol
