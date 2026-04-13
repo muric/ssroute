@@ -1,12 +1,9 @@
 use std::net::IpAddr;
 use std::path::Path;
-use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use futures::TryStreamExt;
-
-use crate::stats::{classify_error_str, Stats};
 
 /// Add a single route via netlink.
 /// Returns Ok(()) if route added or already exists, Err only for real errors.
@@ -199,7 +196,6 @@ pub async fn add_routes_from_dir(
     iface_name: &str,
     concurrency: usize,
     debug: bool,
-    stats: &Arc<Stats>,
 ) -> Result<()> {
     let dir_path = dir;
     if !dir_path.exists() {
@@ -282,7 +278,6 @@ pub async fn add_routes_from_dir(
         };
 
         let handle_ref = &handle;
-        let stats_ref = &stats;
 
         stream::iter(destinations.into_iter())
             .for_each_concurrent(concurrency, |dest| async move {
@@ -295,7 +290,6 @@ pub async fn add_routes_from_dir(
                     }
                     _ => {
                         tracing::error!("Invalid destination format {dest}");
-                        stats_ref.add_error("parse_error");
                         return;
                     }
                 };
@@ -313,39 +307,7 @@ pub async fn add_routes_from_dir(
                     }
                 };
 
-                match add_route(handle_ref, &dest, route_gw, iface_index).await {
-                    Ok(()) => {
-                        stats_ref.add_success();
-                    }
-                    Err(e) => {
-                        let err_str = format!("{e}");
-                        let err_type = classify_error_str(&err_str);
-                        match err_type {
-                            "file_exists" => {
-                                stats_ref.add_already_exist(format!(
-                                    "{dest} via {route_gw:?} dev {iface_name}"
-                                ));
-                            }
-                            "no_such_device" => {
-                                tracing::error!(
-                                    "interface '{}' disappeared during route loading",
-                                    iface_name
-                                );
-                                stats_ref.add_error("no_such_device");
-                            }
-                            _ => {
-                                stats_ref.add_error(err_type);
-                                // Show error type and full details for debugging
-                                tracing::warn!(
-                                    "Failed route {dest} via {route_gw:?} dev {iface_name}: {err_type}"
-                                );
-                                if debug {
-                                    tracing::info!("  Root cause: {e:#}");
-                                }
-                            }
-                        }
-                    }
-                }
+                let _ = add_route(handle_ref, &dest, route_gw, iface_index).await;
             })
             .await;
     }

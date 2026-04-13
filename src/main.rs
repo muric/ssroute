@@ -1,12 +1,10 @@
 mod config;
 mod plugin;
 mod route;
-mod stats;
 mod tun;
 mod tunnel;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use zbus::{Connection, Proxy};
@@ -120,12 +118,7 @@ async fn run_oneshot_mode(config: &config::Config, config_dir: &Path) -> Result<
     tracing::info!("Setting gateway IP and MTU={} on TUN interface", config.mtu);
     tun::configure_tun(&config.interface, &config.gateway, &config.gateway6, config.mtu).await?;
 
-    let stats = Arc::new(stats::Stats::new());
-    add_routes(config, config_dir, &stats).await;
-    stats.print_stats();
-    if let Some(mut s) = Arc::into_inner(stats) {
-        s.shutdown().await;
-    }
+    add_routes(config, config_dir).await;
 
     Ok(())
 }
@@ -191,23 +184,7 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
         }
     }
     
-    let stats = Arc::new(stats::Stats::new());
-    add_routes(&config, config_dir, &stats).await;
-    stats.print_stats();
-    // Shut down stats promptly: routes are added only at startup, no need to
-    // hold the writer task and channel buffer alive for the daemon lifetime.
-    match Arc::try_unwrap(stats) {
-        Ok(mut s) => {
-            s.shutdown().await;
-        }
-        Err(arc) => {
-            tracing::warn!(
-                "Stats Arc still has {} strong references; \
-                 writer task/channel will remain running until process exit",
-                Arc::strong_count(&arc)
-            );
-        }
-    }
+    add_routes(&config, config_dir).await;
 
     tracing::info!("Daemon running!!!");
 
@@ -251,21 +228,11 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
 }
 
 /// Add routes from data/ and default_route/ relative to config_dir.
-async fn add_routes(config: &config::Config, config_dir: &Path, stats: &Arc<stats::Stats>) {
+async fn add_routes(config: &config::Config, config_dir: &Path) {
     if !config.interface.is_empty() && (!config.gateway.is_empty() || !config.gateway6.is_empty()) {
         let dir = config_dir.join("data");
         tracing::info!("Adding routes for interface: {} from {}", config.interface, dir.display());
-        if let Err(e) = route::add_routes_from_dir(
-            &dir,
-            &config.gateway,
-            &config.gateway6,
-            &config.interface,
-            config.concurrency,
-            config.debug,
-            stats,
-        )
-        .await
-        {
+        if let Err(e) = route::add_routes_from_dir(&dir, &config.gateway, &config.gateway6, &config.interface, config.concurrency, config.debug).await {
             tracing::error!("Error adding routes: {e}");
         }
     }
@@ -273,17 +240,7 @@ async fn add_routes(config: &config::Config, config_dir: &Path, stats: &Arc<stat
     if !config.default_interface.is_empty() && !config.default_gateway.is_empty() {
         let dir = config_dir.join("default_route");
         tracing::info!("Adding routes for default interface: {} from {}", config.default_interface, dir.display());
-        if let Err(e) = route::add_routes_from_dir(
-            &dir,
-            &config.default_gateway,
-            "", // no separate IPv6 gateway for default routes
-            &config.default_interface,
-            config.concurrency,
-            config.debug,
-            stats,
-        )
-        .await
-        {
+        if let Err(e) = route::add_routes_from_dir(&dir, &config.default_gateway, "", &config.default_interface, config.concurrency, config.debug).await {
             tracing::error!("Error adding default routes: {e}");
         }
     }
