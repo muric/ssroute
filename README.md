@@ -371,6 +371,13 @@ sudo ssroute
 sudo ssroute --config /path/to/ssroute.conf
 ```
 
+Дополнительные параметры командной строки:
+
+```bash
+sudo ssroute --version    # вывести версию и выйти
+sudo ssroute --help       # вывести справку и выйти
+```
+
 При разработке (из корня проекта):
 
 ```bash
@@ -395,6 +402,14 @@ sudo systemctl stop ssroute
 ```bash
 journalctl -u ssroute -f
 ```
+
+#### Интеграция с NetworkManager
+
+В daemon-режиме ssroute автоматически уведомляет NetworkManager (через D-Bus) о том, что TUN-интерфейс должен быть неуправляемым. Это предотвращает вмешательство NetworkManager в маршрутизацию через туннель. Если NetworkManager не запущен или D-Bus недоступен, этот шаг пропускается без ошибки.
+
+#### Интеграция с systemd-networkd (oneshot-режим)
+
+В oneshot-режиме ssroute создаёт файл `/etc/systemd/network/99-ssroute.network`, который указывает systemd-networkd не управлять TUN-интерфейсом. Файл создаётся только при необходимости (если содержимое изменилось).
 
 <a id="ru-verification"></a>
 ### Проверка работоспособности
@@ -426,6 +441,20 @@ ping -c 3 91.108.4.1
 ```bash
 curl -I https://www.google.com
 ```
+
+**Статистика загрузки маршрутов:**
+
+После загрузки маршрутов ssroute выводит сводную статистику в лог:
+
+```
+========== Statistics ==========
+Successfully added: 12345
+Already existed (skipped): 42
+Total processed: 12387
+================================
+```
+
+Дублирующиеся маршруты (уже существующие в системе) записываются в файл `/tmp/route_duplicates_<timestamp>.log` для диагностики.
 
 **Диагностика V2Ray/XRay плагина (если используется):**
 
@@ -876,6 +905,13 @@ Config is searched automatically: first in CWD, then in `/etc/ssroute/`. You can
 sudo ssroute --config /path/to/ssroute.conf
 ```
 
+Additional command-line options:
+
+```bash
+sudo ssroute --version    # print version and exit
+sudo ssroute --help       # print help and exit
+```
+
 During development (from project root):
 
 ```bash
@@ -900,6 +936,14 @@ View logs:
 ```bash
 journalctl -u ssroute -f
 ```
+
+#### NetworkManager Integration
+
+In daemon mode, ssroute automatically notifies NetworkManager (via D-Bus) to leave the TUN interface unmanaged. This prevents NetworkManager from interfering with the tunnel routing. If NetworkManager is not running or D-Bus is unavailable, this step is skipped silently.
+
+#### systemd-networkd Integration (oneshot mode)
+
+In oneshot mode, ssroute creates `/etc/systemd/network/99-ssroute.network` to tell systemd-networkd not to manage the TUN interface. The file is only written when its content has changed.
 
 <a id="en-verification"></a>
 ### Verification
@@ -931,6 +975,20 @@ If the route for this IP goes through the TUN interface (listed in `data/`), the
 ```bash
 curl -I https://www.google.com
 ```
+
+**Route loading statistics:**
+
+After loading routes, ssroute prints a summary to the log:
+
+```
+========== Statistics ==========
+Successfully added: 12345
+Already existed (skipped): 42
+Total processed: 12387
+================================
+```
+
+Duplicate routes (already present in the kernel) are written to `/tmp/route_duplicates_<timestamp>.log` for diagnostics.
 
 **V2Ray/XRay Plugin Diagnostics (if used):**
 
