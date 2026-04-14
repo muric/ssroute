@@ -163,7 +163,6 @@ gateway=10.0.0.1
 gateway6=2001:db8::1
 interface=tun2
 concurrency=100
-debug=false
 ss_enabled=false
 ```
 
@@ -175,7 +174,6 @@ gateway=10.0.0.1
 gateway6=2001:db8::1
 interface=tun2
 concurrency=100
-debug=false
 mtu=1400
 
 # Интерфейс по умолчанию (для маршрутов из default_route/)
@@ -194,7 +192,7 @@ obfs_mode=disable
 # obfs_mode=xray
 # obfs_host=www.bing.com
 # ss_plugin=v2ray-plugin
-# ss_plugin_opts=server;tls;host=example.com
+# ss_plugin_opts=client;tls;host=example.com
 ```
 
 **Параметры конфигурации:**
@@ -207,7 +205,6 @@ obfs_mode=disable
 | `default_gw` | Шлюз (IPv4 или IPv6) для маршрутов из `default_route/` | (опционально) |
 | `default_interface` | Интерфейс для маршрутов из `default_route/` | (опционально) |
 | `concurrency`, `goroutine_count` | Количество параллельных воркеров для загрузки маршрутов | `4` |
-| `debug` | Подробное логирование ошибок маршрутизации | `false` |
 | `mtu` | MTU для TUN-интерфейса (0 = авто 1500) | `0` |
 | `ss_enabled` | Включить daemon-режим с Shadowsocks | `false` |
 | `ss_server` | Адрес Shadowsocks-сервера | (обязательный при SS) |
@@ -241,7 +238,7 @@ XRay интегрируется в ssroute через стандарт **SIP003*
    - `SS_REMOTE_PORT` — порт Shadowsocks-сервера
    - `SS_LOCAL_HOST` — локальный адрес для прослушивания (127.0.0.1)
    - `SS_LOCAL_PORT` — свободный локальный порт
-   - `SS_PLUGIN_OPTIONS` — опции плагина (например, `server;tls;host=www.bing.com`)
+   - `SS_PLUGIN_OPTIONS` — опции плагина (например, `client;tls;host=www.bing.com`)
 
 2. **Туннелирование трафика**:
    - Плагин создаёт локальный сокет на `127.0.0.1:SS_LOCAL_PORT`
@@ -251,8 +248,8 @@ XRay интегрируется в ssroute через стандарт **SIP003*
    - Плагин пересылает трафик на реальный Shadowsocks-сервер
 
 3. **Типы обфускации**:
-   - **TLS режим** (`server;tls;host=...`) — трафик выглядит как HTTPS, более безопасно
-   - **HTTP режим** (`server;host=...`) — трафик выглядит как HTTP, быстрее
+   - **TLS режим** (`client;tls;host=...`) — трафик выглядит как HTTPS, более безопасно
+   - **HTTP режим** (`client;host=...`) — трафик выглядит как HTTP, быстрее
    - **Выбор хоста** — используется реальный существующий домен для верификации сертификата
 
 4. **Управление процессом**:
@@ -298,7 +295,7 @@ v2ray-plugin --version
    obfs_mode=xray
    obfs_host=www.bing.com
    ss_plugin=v2ray-plugin
-   ss_plugin_opts=server;tls;host=www.bing.com
+   ss_plugin_opts=client;tls;host=www.bing.com
    ```
 
 2. **HTTP режим (быстрее, менее защищен):**
@@ -306,7 +303,7 @@ v2ray-plugin --version
    obfs_mode=xray
    obfs_host=example.com
    ss_plugin=v2ray-plugin
-   ss_plugin_opts=server;host=example.com
+   ss_plugin_opts=client;host=example.com
    ```
 
 3. **С проверкой сертификата:**
@@ -314,7 +311,7 @@ v2ray-plugin --version
    obfs_mode=xray
    obfs_host=cloudflare.com
    ss_plugin=v2ray-plugin
-   ss_plugin_opts=server;tls;host=cloudflare.com;cert=/etc/ssl/certs/ca-certificates.crt
+   ss_plugin_opts=client;tls;host=cloudflare.com;cert=/etc/ssl/certs/ca-certificates.crt
    ```
 
 **Важные замечания:**
@@ -336,7 +333,7 @@ ss_method=chacha20-ietf-poly1305
 obfs_mode=xray
 obfs_host=www.bing.com
 ss_plugin=v2ray-plugin
-ss_plugin_opts=server;tls;host=www.bing.com
+ss_plugin_opts=client;tls;host=www.bing.com
 mtu=1350
 ```
 
@@ -471,7 +468,7 @@ export SS_REMOTE_HOST=203.0.113.50
 export SS_REMOTE_PORT=8388
 export SS_LOCAL_HOST=127.0.0.1
 export SS_LOCAL_PORT=5555
-export SS_PLUGIN_OPTIONS="server;tls;host=www.bing.com"
+export SS_PLUGIN_OPTIONS="client;tls;host=www.bing.com"
 v2ray-plugin
 
 # В другом терминале проверить, слушает ли порт
@@ -508,17 +505,20 @@ ps auxe | grep xray-plugin
 Управление уровнем логирования через переменную `RUST_LOG`:
 
 ```bash
-# По умолчанию (info)
+# По умолчанию (info уровень)
 sudo ssroute
 
-# Подробный вывод
+# Подробный вывод (debug)
 sudo RUST_LOG=debug ssroute
 
-# Максимально подробный вывод
+# Максимально подробный вывод (trace)
 sudo RUST_LOG=trace ssroute
 
-# Для конкретного модуля
+# Только для конкретного модуля
 sudo RUST_LOG=ssroute::tunnel=debug ssroute
+
+# Фильтр по нескольким модулям
+sudo RUST_LOG=ssroute::plugin=trace,ssroute::tunnel=debug ssroute
 ```
 
 Если что-то не работает:
@@ -667,7 +667,6 @@ gateway=10.0.0.1
 gateway6=2001:db8::1
 interface=tun2
 concurrency=100
-debug=false
 ss_enabled=false
 ```
 
@@ -679,7 +678,6 @@ gateway=10.0.0.1
 gateway6=2001:db8::1
 interface=tun2
 concurrency=100
-debug=false
 mtu=1400
 
 # Default interface (for routes in default_route/)
@@ -699,7 +697,7 @@ obfs_mode=disable
 # obfs_mode=xray
 # obfs_host=www.bing.com
 # ss_plugin=v2ray-plugin
-# ss_plugin_opts=server;tls;host=example.com
+# ss_plugin_opts=client;tls;host=example.com
 ```
 
 **Config parameters:**
@@ -712,7 +710,6 @@ obfs_mode=disable
 | `default_gw` | Gateway (IPv4 or IPv6) for routes in `default_route/` dir | (optional) |
 | `default_interface` | Interface for routes in `default_route/` dir | (optional) |
 | `concurrency`, `goroutine_count` | Parallel workers for route loading | `4` |
-| `debug` | Verbose error logging for routes | `false` |
 | `mtu` | TUN MTU (0 = auto 1500) | `0` |
 | `ss_enabled` | Enable Shadowsocks daemon mode | `false` |
 | `ss_server` | Shadowsocks server address | (required if SS enabled) |
@@ -746,7 +743,7 @@ XRay integrates into ssroute through the **SIP003** standard (Shadowsocks Plugin
    - `SS_REMOTE_PORT` — port of the Shadowsocks server
    - `SS_LOCAL_HOST` — local address to listen on (127.0.0.1)
    - `SS_LOCAL_PORT` — a free ephemeral local port
-   - `SS_PLUGIN_OPTIONS` — plugin options (e.g., `server;tls;host=www.bing.com`)
+   - `SS_PLUGIN_OPTIONS` — plugin options (e.g., `client;tls;host=www.bing.com`)
 
 2. **Traffic Tunneling**:
    - The plugin creates a local socket listening on `127.0.0.1:SS_LOCAL_PORT`
@@ -756,8 +753,8 @@ XRay integrates into ssroute through the **SIP003** standard (Shadowsocks Plugin
    - The plugin relays encrypted traffic to the real Shadowsocks server
 
 3. **Obfuscation Modes**:
-   - **TLS mode** (`server;tls;host=...`) — traffic looks like HTTPS, more secure
-   - **HTTP mode** (`server;host=...`) — traffic looks like HTTP, faster
+   - **TLS mode** (`client;tls;host=...`) — traffic looks like HTTPS, more secure
+   - **HTTP mode** (`client;host=...`) — traffic looks like HTTP, faster
    - **Host selection** — uses a real existing domain for certificate verification
 
 4. **Process Management**:
@@ -803,7 +800,7 @@ v2ray-plugin --version
    obfs_mode=xray
    obfs_host=www.bing.com
    ss_plugin=v2ray-plugin
-   ss_plugin_opts=server;tls;host=www.bing.com
+   ss_plugin_opts=client;tls;host=www.bing.com
    ```
 
 2. **HTTP mode (faster, less secure):**
@@ -811,7 +808,7 @@ v2ray-plugin --version
    obfs_mode=xray
    obfs_host=example.com
    ss_plugin=v2ray-plugin
-   ss_plugin_opts=server;host=example.com
+   ss_plugin_opts=client;host=example.com
    ```
 
 3. **With certificate verification:**
@@ -819,7 +816,7 @@ v2ray-plugin --version
    obfs_mode=xray
    obfs_host=cloudflare.com
    ss_plugin=v2ray-plugin
-   ss_plugin_opts=server;tls;host=cloudflare.com;cert=/etc/ssl/certs/ca-certificates.crt
+   ss_plugin_opts=client;tls;host=cloudflare.com;cert=/etc/ssl/certs/ca-certificates.crt
    ```
 
 **Important Notes:**
@@ -841,7 +838,7 @@ ss_method=chacha20-ietf-poly1305
 obfs_mode=xray
 obfs_host=www.bing.com
 ss_plugin=v2ray-plugin
-ss_plugin_opts=server;tls;host=www.bing.com
+ss_plugin_opts=client;tls;host=www.bing.com
 mtu=1350
 ```
 
@@ -976,7 +973,7 @@ export SS_REMOTE_HOST=203.0.113.50
 export SS_REMOTE_PORT=8388
 export SS_LOCAL_HOST=127.0.0.1
 export SS_LOCAL_PORT=5555
-export SS_PLUGIN_OPTIONS="server;tls;host=www.bing.com"
+export SS_PLUGIN_OPTIONS="client;tls;host=www.bing.com"
 v2ray-plugin
 
 # In another terminal, verify the port is listening
@@ -1022,8 +1019,11 @@ sudo RUST_LOG=debug ssroute
 # Trace level (very verbose)
 sudo RUST_LOG=trace ssroute
 
-# Module-specific
+# Module-specific logging
 sudo RUST_LOG=ssroute::tunnel=debug ssroute
+
+# Multiple modules with different levels
+sudo RUST_LOG=ssroute::plugin=trace,ssroute::tunnel=debug ssroute
 ```
 
 If something is not working:

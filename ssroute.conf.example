@@ -1,3 +1,11 @@
+# ssroute configuration file
+# Format: key=value
+# Lines starting with # are comments, blank lines are ignored
+
+# ================================
+# TUN Interface Configuration
+# ================================
+
 # Gateway IP address for TUN interface (assigned to the tunnel)
 # Examples: 10.0.0.1
 gateway=10.0.0.1
@@ -10,15 +18,9 @@ gateway6=2001:db8::1
 # Example: tun0, tun2
 interface=tun2
 
-# Number of concurrent workers for parallel route loading.
-# Higher values speed up route loading on multi-core systems.
-# Also accepts legacy name "goroutine_count" for compatibility.
-# Example: 100, 500, 1000
-concurrency=4
-
-# Enable verbose error logging for route operations
-# Values: true, false
-debug=false
+# ================================
+# Default Route Configuration
+# ================================
 
 # Default gateway IP (for routes in default_route/ directory).
 # Typically your main router IP.
@@ -29,7 +31,25 @@ default_gw=192.168.1.1
 # Example: eth0, br0
 default_interface=eth0
 
-# ---- Shadowsocks client ----
+# ================================
+# Performance Settings
+# ================================
+
+# Number of concurrent workers for parallel route loading.
+# Higher values speed up route loading on multi-core systems.
+# Also accepts legacy name "goroutine_count" for compatibility.
+# Example: 100, 500, 1000
+concurrency=4
+
+# TUN MTU (0 = auto-detect, default 1500)
+# When using obfuscation plugins, reduce to ~1350 due to encapsulation overhead
+# Examples: 1500, 1400, 1350
+mtu=
+
+# ================================
+# Shadowsocks Daemon Mode
+# ================================
+
 # Enable built-in Shadowsocks client and TUN packet processing.
 # When enabled, ssroute runs as a daemon (does not exit after adding routes).
 # When disabled, ssroute only creates TUN and adds routes.
@@ -51,15 +71,18 @@ ss_password=
 # Supported: aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305
 ss_method=aes-256-gcm
 
-# ---- Obfuscation ----
+# ================================
+# Obfuscation (Optional)
+# ================================
+
 # Traffic obfuscation mode.
 # Values:
 #   disable     - no obfuscation, direct SS connection (default)
 #   simple-obfs - built-in HTTP/TLS obfuscation (not implemented yet)
-#   v2ray       - V2Ray plugin via SIP003 protocol (external binary)
-# 
-# When set to v2ray, ssroute will:
-# 1. Start the v2ray-plugin process with SIP003 environment variables
+#   xray        - XRay plugin via SIP003 protocol (external binary)
+#
+# When set to xray, ssroute will:
+# 1. Start the xray-plugin process with SIP003 environment variables
 # 2. Plugin creates local tunnel and forwards to SS server with obfuscation
 # 3. SS proxy connects through the plugin's local port
 # 4. Result: DPI sees normal HTTPS/HTTP traffic, not SS protocol
@@ -67,24 +90,26 @@ obfs_mode=disable
 
 # Host to impersonate when obfuscation is enabled.
 # DPI will see traffic as if it goes to this host.
-# Used by both simple-obfs and v2ray modes.
+# Used by xray mode.
 # Example: www.bing.com, cloudflare.com
 obfs_host=www.bing.com
 
-# ---- XRay Plugin Configuration (only when obfs_mode=xray) ----
-# 
+# ================================
+# XRay Plugin Configuration
+# ================================
+
 # The XRay plugin provides DPI evasion by tunneling SS traffic through
 # legitimate-looking HTTPS/HTTP traffic. It's a SIP003-compatible plugin
 # that works with any SS implementation.
 #
 # Installation on Linux:
 #   1. Install xray-plugin binary
-#      Ubuntu/Debian: apt install xray-plugin
-#      Or download: https://github.com/teddysun/xray-plugin/releases
-#   2. Ensure it's in PATH or specify full path below
+#      Ubuntu/Debian: apt install v2ray-plugin
+#      Or download: https://github.com/shadowsocks/v2ray-plugin/releases
+#   2. Ensure it's in PATH
 #
 # Requirements:
-#   - xray-plugin binary (external, not included)
+#   - v2ray-plugin or xray-plugin binary (external, not included)
 #   - Valid obfs_host for TLS certificate verification
 #   - Consider lowering MTU to ~1350 if experiencing issues
 
@@ -92,35 +117,44 @@ obfs_host=www.bing.com
 # The plugin must support SIP003 protocol environment variables.
 # Examples:
 #   xray-plugin                       (if in PATH)
-#   /usr/bin/xray-plugin              (absolute path)
-#   /usr/local/bin/xray-plugin        (custom installation)
+#   v2ray-plugin                      (if in PATH, alias for xray mode)
+#   /usr/bin/v2ray-plugin             (absolute path)
 ss_plugin=xray-plugin
 
 # Plugin options string (passed via SS_PLUGIN_OPTIONS env to the plugin).
 # Format: semicolon-separated key=value pairs
-# Common modes:
-#   
+# IMPORTANT: ssroute uses xray-plugin as a CLIENT, so use 'client;' prefix.
+#
 #   HTTP obfuscation (faster, less secure):
-#     server;host=example.com
+#     client;host=example.com
 #
 #   HTTPS/TLS obfuscation (slower, DPI-resistant):
-#     server;tls;host=example.com
+#     client;tls;host=example.com
 #
 #   HTTPS with specific certificate verification:
-#     server;tls;host=example.com;cert=path/to/cert.pem
+#     client;tls;host=example.com;cert=path/to/cert.pem
 #
 # Full options documentation:
+#   https://github.com/shadowsocks/v2ray-plugin#usage
 #   https://github.com/teddysun/xray-plugin#usage
 #
 # Examples:
-#   ss_plugin_opts=server;tls;host=www.bing.com
-#   ss_plugin_opts=server;host=cloudflare.com
-#   ss_plugin_opts=server;tls;host=example.com;cert=/etc/ssl/certs/ca-certificates.crt
-ss_plugin_opts=server;tls;host=www.bing.com
+#   ss_plugin_opts=client;tls;host=www.bing.com
+#   ss_plugin_opts=client;host=cloudflare.com
+#   ss_plugin_opts=client;tls;host=example.com;cert=/etc/ssl/certs/ca-certificates.crt
+ss_plugin_opts=client;tls;host=www.bing.com
 
-# ---- TUN MTU ----
-# MTU size for TUN interface.
-# When not set, defaults to 1500.
-# Lower values may be needed with obfuscation (e.g. 1350 for v2ray).
-# Example: 1500, 1400, 1350
-mtu=
+# ================================
+# Logging
+# ================================
+
+# Set log level via RUST_LOG environment variable:
+#   RUST_LOG=debug          # Enable debug logging (recommended for troubleshooting)
+#   RUST_LOG=trace          # Maximum verbosity (very verbose)
+#   RUST_LOG=ssroute::tunnel=debug  # Module-specific logging
+#   RUST_LOG=ssroute::plugin=trace,ssroute::tunnel=debug  # Multiple modules
+#
+# Examples:
+#   sudo RUST_LOG=debug ssroute
+#   RUST_LOG=debug sudo systemctl start ssroute
+#   sudo RUST_LOG=trace journalctl -u ssroute

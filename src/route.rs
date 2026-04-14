@@ -195,7 +195,6 @@ pub async fn add_routes_from_dir(
     gateway6: &str,
     iface_name: &str,
     concurrency: usize,
-    _debug: bool,
 ) -> Result<()> {
     let dir_path = dir;
     if !dir_path.exists() {

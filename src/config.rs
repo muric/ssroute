@@ -23,7 +23,6 @@ pub struct Config {
     pub default_gateway: String,
     pub default_interface: String,
     pub concurrency: usize,
-    pub debug: bool,
     pub mtu: u16, // 0 = auto
 
     // Shadowsocks
@@ -51,7 +50,6 @@ impl Default for Config {
             default_gateway: String::new(),
             default_interface: String::new(),
             concurrency: DEFAULT_CONCURRENCY,
-            debug: false,
             mtu: 0,
 
             ss_enabled: false,
@@ -104,18 +102,14 @@ pub fn read_config(path: &Path) -> Result<Config> {
                     .parse()
                     .with_context(|| format!("invalid concurrency value '{value}'"))?;
             }
-            "debug" => {
-                config.debug =
-                    parse_bool(value).with_context(|| format!("invalid debug value '{value}'"))?;
-            }
             "mtu" => {
                 config.mtu = value
                     .parse()
                     .with_context(|| format!("invalid mtu value '{value}'"))?;
             }
             "ss_enabled" => {
-                config.ss_enabled = parse_bool(value)
-                    .with_context(|| format!("invalid ss_enabled value '{value}'"))?;
+                config.ss_enabled =
+                    value.to_lowercase() == "true" || value == "1" || value == "yes";
             }
             "ss_server" => config.ss_server = value.to_string(),
             "ss_server_port" => {
@@ -146,14 +140,6 @@ pub fn read_config(path: &Path) -> Result<Config> {
     }
 
     Ok(config)
-}
-
-fn parse_bool(s: &str) -> Result<bool> {
-    match s.to_lowercase().as_str() {
-        "true" | "1" | "yes" => Ok(true),
-        "false" | "0" | "no" => Ok(false),
-        _ => bail!("cannot parse '{s}' as boolean"),
-    }
 }
 
 #[cfg(test)]
@@ -187,7 +173,6 @@ mod tests {
              default_gw=192.168.1.1\n\
              default_interface=eth0\n\
              concurrency=100\n\
-             debug=true\n\
              mtu=1400\n\
              ss_enabled=true\n\
              ss_server=1.2.3.4\n\
@@ -204,7 +189,6 @@ mod tests {
         assert_eq!(config.default_gateway, "192.168.1.1");
         assert_eq!(config.default_interface, "eth0");
         assert_eq!(config.concurrency, 100);
-        assert!(config.debug);
         assert_eq!(config.mtu, 1400);
         assert!(config.ss_enabled);
         assert_eq!(config.ss_server, "1.2.3.4");

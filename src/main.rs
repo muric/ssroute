@@ -35,18 +35,16 @@ async fn main() -> Result<()> {
         println!("  --help, -h       Print this help and exit");
         println!();
         println!("Environment:");
-        println!("  RUST_LOG         Log level (default: info). Example: RUST_LOG=debug");
+        println!("  RUST_LOG=debug   Enable verbose debug logging");
         return Ok(());
     }
 
     let config_path = parse_config_flag(&args)?;
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Init logging BEFORE parsing config (for config parsing errors)
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     // Find config file
     let config_path = find_config(&config_path)?;
@@ -263,7 +261,6 @@ async fn add_routes(config: &config::Config, config_dir: &Path) {
             &config.gateway6,
             &config.interface,
             config.concurrency,
-            config.debug,
         )
         .await
         {
@@ -284,7 +281,6 @@ async fn add_routes(config: &config::Config, config_dir: &Path) {
             "",
             &config.default_interface,
             config.concurrency,
-            config.debug,
         )
         .await
         {
