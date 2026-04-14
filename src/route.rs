@@ -2,7 +2,7 @@ use std::net::IpAddr;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use futures::stream::{self, StreamExt};
+use futures::stream;
 use futures::TryStreamExt;
 
 /// Add a single route via netlink.
@@ -110,8 +110,7 @@ async fn add_route(
                     }
                 }
                 Err(e) => Err(e).with_context(|| format!(
-                    "netlink add_route: destination={destination}, gateway={:?}, iface_index={iface_index}",
-                    gateway
+                    "netlink add_route: destination={destination}, gateway={gateway:?}, iface_index={iface_index}"
                 )),
             }
         }
@@ -210,8 +209,7 @@ pub async fn add_routes_from_dir(
         let err_str = format!("{e}");
         if err_str.contains("not found") || err_str.contains("Link not found") {
             anyhow::anyhow!(
-                "interface '{}' does not exist — check 'interface' or 'default_interface' in config",
-                iface_name
+                "interface '{iface_name}' does not exist — check 'interface' or 'default_interface' in config"
             )
         } else {
             e
@@ -265,8 +263,6 @@ pub async fn add_routes_from_dir(
         tracing::info!("Processing: {file_name}");
 
         let file_path = dir_path.join(file_name);
-        // The raw JSON string (`data`) is freed at the end of this block,
-        // before concurrent route processing begins.
         let destinations: Vec<String> = {
             let data = match std::fs::read_to_string(&file_path) {
                 Ok(d) => d,
@@ -284,42 +280,36 @@ pub async fn add_routes_from_dir(
             }
         };
 
-        let handle_ref = &handle;
+        let gw = gw;
 
-        stream::iter(destinations.into_iter())
-            .for_each_concurrent(concurrency, |dest| async move {
-                // Determine which gateway to use based on destination IP version.
-                // We only need to distinguish IPv4 vs IPv6 here; full parsing is done in add_route.
-                let is_ipv4 = match dest.split('/').next() {
-                    Some(ip_part) if !ip_part.is_empty() => {
-                        // Heuristic: IPv6 addresses contain ':', IPv4 addresses do not.
-                        !ip_part.contains(':')
-                    }
-                    _ => {
-                        tracing::error!("Invalid destination format {dest}");
-                        return;
-                    }
-                };
+        // Process destinations sequentially to avoid ownership issues
+        for dest in destinations {
+            let is_ipv4 = match dest.split('/').next() {
+                Some(ip_part) if !ip_part.is_empty() => !ip_part.contains(':'),
+                _ => {
+                    tracing::error!("Invalid destination format {dest}");
+                    continue;
+                }
+            };
 
-                let route_gw: Option<IpAddr> = if is_ipv4 {
-                    gw.filter(|g| g.is_ipv4())
+            let route_gw: Option<IpAddr> = if is_ipv4 {
+                gw.filter(|g| g.is_ipv4())
+            } else {
+                if iface_name.contains("tun") {
+                    tracing::debug!(
+                        "TUN interface detected, using interface-only IPv6 route for {dest}"
+                    );
+                    None
                 } else {
-                    // For IPv6 on TUN interfaces, don't use gateway if it's assigned to the interface itself
-                    // TUN interfaces need interface-only routes
-                    if iface_name.contains("tun") {
-                        tracing::debug!(
-                            "TUN interface detected, using interface-only IPv6 route for {dest}"
-                        );
-                        None
-                    } else {
-                        gw6.filter(|g| g.is_ipv6())
-                            .or_else(|| gw.filter(|g| g.is_ipv6()))
-                    }
-                };
+                    gw6.or_else(|| gw.filter(|g| g.is_ipv6()))
+                }
+            };
 
-                let _ = add_route(handle_ref, &dest, route_gw, iface_index).await;
-            })
-            .await;
+            if let Err(e) = add_route(&handle, &dest, route_gw, iface_index).await {
+                tracing::error!("Failed to add route {dest}: {e}");
+                bail!("Failed to add route {dest}: {e}");
+            }
+        }
     }
 
     Ok(())

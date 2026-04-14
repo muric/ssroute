@@ -175,7 +175,7 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
     wait_for_interface(&config.interface).await;
 
     if let Err(e) = setup_unmanaged_interface(&config.interface).await {
-        eprintln!("NetworkManager integration error: {}", e);
+        eprintln!("NetworkManager integration error: {e}");
     }
 
     // Configure TUN interface: assign IP addresses and MTU
@@ -393,7 +393,7 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
     )
     .await?;
 
-    println!("Waiting for NetworkManager to detect {}...", iface_name);
+    println!("Waiting for NetworkManager to detect {iface_name}...");
 
     // 4. Polling: NM needs a moment to see the new kernel device
     let mut device_path = None;
@@ -414,8 +414,7 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
     }
 
     let path = device_path.ok_or(format!(
-        "Timeout: NM did not recognize {} within 3s",
-        iface_name
+        "Timeout: NM did not recognize {iface_name} within 3s",
     ))?;
 
     // 5. Create proxy for the specific device and set 'Managed' to false
@@ -430,10 +429,7 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
     // Note: set_property handles the type wrapping automatically
     device_proxy.set_property("Managed", false).await?;
 
-    println!(
-        "Interface {} is now UNMANAGED by NetworkManager.",
-        iface_name
-    );
+    println!("Interface {iface_name} is now UNMANAGED by NetworkManager.");
     Ok(())
 }
 

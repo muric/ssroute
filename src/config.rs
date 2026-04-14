@@ -7,6 +7,17 @@ use anyhow::{bail, Context, Result};
 const DEFAULT_CONCURRENCY: usize = 4;
 const DEFAULT_MTU: u16 = 1500;
 
+/// Parse a boolean string value.
+/// Accepts: true/false, yes/no, 1/0 (case-insensitive).
+/// Returns an error for unknown values to avoid silent misconfiguration.
+pub fn parse_bool(s: &str) -> Result<bool> {
+    match s.to_lowercase().as_str() {
+        "true" | "yes" | "1" => Ok(true),
+        "false" | "no" | "0" => Ok(false),
+        _ => bail!("boolean value expected, got '{s}'"),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObfsMode {
     Disable,
@@ -108,8 +119,7 @@ pub fn read_config(path: &Path) -> Result<Config> {
                     .with_context(|| format!("invalid mtu value '{value}'"))?;
             }
             "ss_enabled" => {
-                config.ss_enabled =
-                    value.to_lowercase() == "true" || value == "1" || value == "yes";
+                config.ss_enabled = parse_bool(value)?;
             }
             "ss_server" => config.ss_server = value.to_string(),
             "ss_server_port" => {
@@ -229,5 +239,36 @@ mod tests {
         let f = write_temp_config("gateway6=2001:db8::2\ninterface=tun2\n");
         let config = read_config(f.path()).unwrap();
         assert_eq!(config.gateway6, "2001:db8::2");
+    }
+
+    #[test]
+    fn test_ss_enabled_variants() {
+        let test_cases = vec![
+            ("true", true),
+            ("false", false),
+            ("True", true),
+            ("FALSE", false),
+            ("yes", true),
+            ("no", false),
+            ("Yes", true),
+            ("No", false),
+            ("1", true),
+            ("0", false),
+        ];
+        for (input, expected) in test_cases {
+            let f = write_temp_config(&format!("gateway=10.0.0.1\ninterface=tun2\nss_enabled={}\n", input));
+            let config = read_config(f.path()).unwrap();
+            assert_eq!(config.ss_enabled, expected, "ss_enabled={}", input);
+        }
+    }
+
+    #[test]
+    fn test_ss_enabled_invalid_value() {
+        let test_cases = vec!["tru", "ye", "Falsey", "1.0", "on", "off"];
+        for input in test_cases {
+            let f = write_temp_config(&format!("gateway=10.0.0.1\ninterface=tun2\nss_enabled={}\n", input));
+            let result = read_config(f.path());
+            assert!(result.is_err(), "ss_enabled={} should fail", input);
+        }
     }
 }
