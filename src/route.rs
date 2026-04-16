@@ -284,7 +284,7 @@ pub async fn add_routes_from_dir(
         let handle_ref = &handle;
         let stats_ref = &stats;
 
-        stream::iter(destinations.into_iter())
+        stream::iter(destinations)
             .for_each_concurrent(concurrency, |dest| async move {
                 // Determine which gateway to use based on destination IP version.
                 // We only need to distinguish IPv4 vs IPv6 here; full parsing is done in add_route.
