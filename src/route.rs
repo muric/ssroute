@@ -2,7 +2,6 @@ use std::net::IpAddr;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use futures::stream;
 use futures::TryStreamExt;
 
 /// Add a single route via netlink.
@@ -60,10 +59,11 @@ async fn add_route(
                         )),
                     }
                 }
-                Err(e) => Err(e).with_context(|| format!(
-                    "netlink add_route: destination={destination}, gateway={:?}, iface_index={iface_index}",
-                    gateway
-                )),
+                Err(e) => Err(e).with_context(|| {
+                    format!(
+                        "netlink add_route: destination={destination}, gateway={gateway:?}, iface_index={iface_index}"
+                    )
+                }),
             }
         }
         IpAddr::V6(dest_ip) => {
@@ -193,7 +193,7 @@ pub async fn add_routes_from_dir(
     gateway: &str,
     gateway6: &str,
     iface_name: &str,
-    concurrency: usize,
+    _concurrency: usize,
 ) -> Result<()> {
     let dir_path = dir;
     if !dir_path.exists() {
@@ -280,9 +280,6 @@ pub async fn add_routes_from_dir(
             }
         };
 
-        let gw = gw;
-
-        // Process destinations sequentially to avoid ownership issues
         for dest in destinations {
             let is_ipv4 = match dest.split('/').next() {
                 Some(ip_part) if !ip_part.is_empty() => !ip_part.contains(':'),
@@ -294,15 +291,13 @@ pub async fn add_routes_from_dir(
 
             let route_gw: Option<IpAddr> = if is_ipv4 {
                 gw.filter(|g| g.is_ipv4())
+            } else if iface_name.contains("tun") {
+                tracing::debug!(
+                    "TUN interface detected, using interface-only IPv6 route for {dest}"
+                );
+                None
             } else {
-                if iface_name.contains("tun") {
-                    tracing::debug!(
-                        "TUN interface detected, using interface-only IPv6 route for {dest}"
-                    );
-                    None
-                } else {
-                    gw6.or_else(|| gw.filter(|g| g.is_ipv6()))
-                }
+                gw6.or_else(|| gw.filter(|g| g.is_ipv6()))
             };
 
             if let Err(e) = add_route(&handle, &dest, route_gw, iface_index).await {

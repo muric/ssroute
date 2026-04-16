@@ -256,9 +256,9 @@ mod tests {
             ("0", false),
         ];
         for (input, expected) in test_cases {
-            let f = write_temp_config(&format!("gateway=10.0.0.1\ninterface=tun2\nss_enabled={}\n", input));
+            let f = write_temp_config(&format!("gateway=10.0.0.1\ninterface=tun2\nss_enabled={input}\n"));
             let config = read_config(f.path()).unwrap();
-            assert_eq!(config.ss_enabled, expected, "ss_enabled={}", input);
+            assert_eq!(config.ss_enabled, expected, "ss_enabled={input}");
         }
     }
 
@@ -266,9 +266,9 @@ mod tests {
     fn test_ss_enabled_invalid_value() {
         let test_cases = vec!["tru", "ye", "Falsey", "1.0", "on", "off"];
         for input in test_cases {
-            let f = write_temp_config(&format!("gateway=10.0.0.1\ninterface=tun2\nss_enabled={}\n", input));
+            let f = write_temp_config(&format!("gateway=10.0.0.1\ninterface=tun2\nss_enabled={input}\n"));
             let result = read_config(f.path());
-            assert!(result.is_err(), "ss_enabled={} should fail", input);
+            assert!(result.is_err(), "ss_enabled={input} should fail");
         }
     }
 }

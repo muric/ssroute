@@ -78,9 +78,7 @@ pub async fn ensure_plugin_available(plugin: &str) -> Result<()> {
 
     if !status.success() {
         bail!(
-            "plugin '{}' is not available (exit status={})",
-            plugin,
-            status
+            "plugin '{plugin}' is not available (exit status={status})",
         );
     }
     Ok(())
