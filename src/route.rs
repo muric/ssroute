@@ -303,13 +303,15 @@ pub async fn add_routes_from_dir(
                 let route_gw: Option<IpAddr> = if is_ipv4 {
                     gw.filter(|g| g.is_ipv4())
                 } else {
-                    // For IPv6 on TUN interfaces, don't use gateway if it's assigned to the interface itself
-                    // TUN interfaces need interface-only routes
-                    if iface_name.contains("tun") {
-                        tracing::debug!("TUN interface detected, using interface-only IPv6 route for {dest}");
-                        None
-                    } else {
-                        gw6.filter(|g| g.is_ipv6()).or_else(|| gw.filter(|g| g.is_ipv6()))
+                    // For IPv6: use gateway6 if set and IPv6, otherwise report error
+                    match gw6 {
+                        Some(gw6_ip) if gw6_ip.is_ipv6() => Some(gw6_ip),
+                        _ => {
+                            // No valid IPv6 gateway - cannot route IPv6 traffic
+                            tracing::error!("No IPv6 gateway configured for IPv6 destination {dest}");
+                            stats_ref.add_error("no_ipv6_gateway");
+                            return;
+                        }
                     }
                 };
 
