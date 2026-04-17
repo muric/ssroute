@@ -236,7 +236,7 @@ fn chrono_like_now() -> String {
     let dur = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
-    format!("{}", dur.as_secs())
+    format!("{}s", dur.as_secs())
 }
 
 #[cfg(test)]

@@ -114,11 +114,10 @@ fn find_config(explicit: &Option<PathBuf>) -> Result<PathBuf> {
 async fn run_oneshot_mode(config: &config::Config, config_dir: &Path) -> Result<()> {
     ensure_networkd_config(&config.interface);
 
-    tracing::info!("Creating persistent TUN interface");
+    let mtu = tun::calculate_mtu(config);
+    tracing::info!("Creating persistent TUN interface with MTU={}", mtu);
     tun::create_tun(&config.interface, true)?;
-
-    tracing::info!("Setting gateway IP and MTU={} on TUN interface", config.mtu);
-    tun::configure_tun(&config.interface, &config.gateway, &config.gateway6, config.mtu).await?;
+    tun::configure_tun(&config.interface, &config.gateway, &config.gateway6, mtu).await?;
 
     let stats = Arc::new(stats::Stats::new());
     add_routes(config, config_dir, &stats).await;
@@ -152,7 +151,7 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
                 config.ss_server_port,
             )
             .await
-            .with_context(|| format!("failed to start xray plugin '{}'", config.ss_plugin))?;
+            .with_context(|| format!("failed to start xray plugin '{config_ss_plugin}'", config_ss_plugin = config.ss_plugin))?;
 
             let parts: Vec<&str> = p.local_addr.split(':').collect();
             if parts.len() == 2 {
@@ -171,24 +170,19 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
 
     let mut service_handle = tokio::spawn(async move { tunnel::run_service(ss_config).await });
 
-    tracing::info!("Waiting for TUN interface '{}' to come up...", config.interface);
+    tracing::info!("Waiting for TUN interface '{iface}' to come up...", iface = config.interface);
     wait_for_interface(&config.interface).await;
     
     if let Err(e) = setup_unmanaged_interface(&config.interface).await {
-        eprintln!("NetworkManager integration error: {}", e);
+        eprintln!("NetworkManager integration error: {e}");
     }
 
     // Configure TUN interface: assign IP addresses and MTU
-    tracing::info!("Configuring TUN interface {} with gateway={}, gateway6={}, mtu={}", 
-        config.interface, config.gateway, config.gateway6, config.mtu);
-    if let Err(e) = tun::configure_tun(&config.interface, &config.gateway, &config.gateway6, config.mtu).await {
+    let mtu = tun::calculate_mtu(&config);
+    tracing::info!("Configuring TUN interface {config_interface} with gateway={config_gateway}, gateway6={config_gateway6}, mtu={mtu}",
+        config_interface = config.interface, config_gateway = config.gateway, config_gateway6 = config.gateway6);
+    if let Err(e) = tun::configure_tun(&config.interface, &config.gateway, &config.gateway6, mtu).await {
         tracing::warn!("Failed to configure TUN interface: {e}");
-    }
-
-    if config.mtu > 0 {
-        if let Err(e) = set_mtu(&config.interface, config.mtu).await {
-            tracing::warn!("Failed to set MTU (backup): {e}");
-        }
     }
     
     let stats = Arc::new(stats::Stats::new());
@@ -316,25 +310,6 @@ async fn interface_exists(name: &str) -> bool {
     result
 }
 
-async fn set_mtu(name: &str, mtu: u16) -> Result<()> {
-    let (connection, handle, _) = rtnetlink::new_connection()?;
-    let conn_handle = tokio::spawn(connection);
-
-    use futures::TryStreamExt;
-    let mut links = handle.link().get().match_name(name.to_string()).execute();
-    if let Some(link) = links.try_next().await? {
-        handle
-            .link()
-            .set(link.header.index)
-            .mtu(mtu as u32)
-            .execute()
-            .await?;
-    }
-
-    conn_handle.abort();
-    Ok(())
-}
-
 /// Create systemd-networkd config so networkd does not interfere with the TUN interface.
 fn ensure_networkd_config(interface: &str) {
     if interface.is_empty() {
@@ -393,7 +368,7 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
     )
     .await?;
 
-    println!("Waiting for NetworkManager to detect {}...", iface_name);
+    println!("Waiting for NetworkManager to detect {iface_name}...");
 
     // 4. Polling: NM needs a moment to see the new kernel device
     let mut device_path = None;
@@ -413,7 +388,7 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
         }
     }
 
-    let path = device_path.ok_or(format!("Timeout: NM did not recognize {} within 3s", iface_name))?;
+    let path = device_path.ok_or(format!("Timeout: NM did not recognize {iface_name} within 3s"))?;
 
     // 5. Create proxy for the specific device and set 'Managed' to false
     let device_proxy = Proxy::new(
@@ -427,7 +402,7 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
     // Note: set_property handles the type wrapping automatically
     device_proxy.set_property("Managed", false).await?;
 
-    println!("Interface {} is now UNMANAGED by NetworkManager.", iface_name);
+    println!("Interface {iface_name} is now UNMANAGED by NetworkManager.");
     Ok(())
 }
 

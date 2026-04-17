@@ -63,10 +63,9 @@ async fn add_route(
                         )),
                     }
                 }
-                Err(e) => Err(e).with_context(|| format!(
-                    "netlink add_route: destination={destination}, gateway={:?}, iface_index={iface_index}",
-                    gateway
-                )),
+                Err(e) => Err(e).with_context(|| {
+                    format!("netlink add_route: destination={destination}, gateway={gateway:?}, iface_index={iface_index}")
+                }),
             }
         }
         IpAddr::V6(dest_ip) => {
@@ -112,10 +111,9 @@ async fn add_route(
                         )),
                     }
                 }
-                Err(e) => Err(e).with_context(|| format!(
-                    "netlink add_route: destination={destination}, gateway={:?}, iface_index={iface_index}",
-                    gateway
-                )),
+                Err(e) => Err(e).with_context(|| {
+                    format!("netlink add_route: destination={destination}, gateway={gateway:?}, iface_index={iface_index}")
+                }),
             }
         }
     }
@@ -214,10 +212,7 @@ pub async fn add_routes_from_dir(
     let iface_index = get_iface_index(&handle, iface_name).await.map_err(|e| {
         let err_str = format!("{e}");
         if err_str.contains("not found") || err_str.contains("Link not found") {
-            anyhow::anyhow!(
-                "interface '{}' does not exist — check 'interface' or 'default_interface' in config",
-                iface_name
-            )
+            anyhow::anyhow!("interface '{iface_name}' does not exist — check 'interface' or 'default_interface' in config")
         } else {
             e
         }
@@ -239,7 +234,7 @@ pub async fn add_routes_from_dir(
 
     let mut json_files: Vec<String> = Vec::new();
     let entries =
-        std::fs::read_dir(dir_path).with_context(|| format!("read directory {}", dir.display()))?;
+        std::fs::read_dir(dir_path).with_context(|| format!("read directory {}", dir_path.display()))?;
 
     for entry in entries {
         let entry = entry?;
