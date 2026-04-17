@@ -6,12 +6,12 @@ use anyhow::{bail, Context, Result};
 use crate::config::{Config, ObfsMode};
 
 /// Calculate appropriate MTU for TUN interface
-/// XRay/V2Ray obfuscation adds TLS/HTTP overhead, requiring smaller MTU (~1350)
+/// XRay/V2Ray obfuscation adds TLS/HTTP overhead, requiring smaller MTU (~1350-1400)
 pub fn calculate_mtu(config: &Config) -> u16 {
     if config.mtu > 0 {
         config.mtu
     } else if config.obfs_mode == ObfsMode::SimpleObfs || !config.ss_plugin.is_empty() {
-        1350 // Reduced MTU for obfuscation plugins
+        1400 // Reduced MTU for obfuscation plugins (xray adds ~100 bytes overhead)
     } else {
         1500 // Default MTU
     }
