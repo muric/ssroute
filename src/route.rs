@@ -63,10 +63,9 @@ async fn add_route(
                         )),
                     }
                 }
-                Err(e) => Err(e).with_context(|| format!(
-                    "netlink add_route: destination={destination}, gateway={:?}, iface_index={iface_index}",
-                    gateway
-                )),
+                Err(e) => Err(e).with_context(|| {
+                    format!("netlink add_route: destination={destination}, gateway={gateway:?}, iface_index={iface_index}")
+                }),
             }
         }
         IpAddr::V6(dest_ip) => {
@@ -112,10 +111,9 @@ async fn add_route(
                         )),
                     }
                 }
-                Err(e) => Err(e).with_context(|| format!(
-                    "netlink add_route: destination={destination}, gateway={:?}, iface_index={iface_index}",
-                    gateway
-                )),
+                Err(e) => Err(e).with_context(|| {
+                    format!("netlink add_route: destination={destination}, gateway={gateway:?}, iface_index={iface_index}")
+                }),
             }
         }
     }
@@ -214,10 +212,7 @@ pub async fn add_routes_from_dir(
     let iface_index = get_iface_index(&handle, iface_name).await.map_err(|e| {
         let err_str = format!("{e}");
         if err_str.contains("not found") || err_str.contains("Link not found") {
-            anyhow::anyhow!(
-                "interface '{}' does not exist — check 'interface' or 'default_interface' in config",
-                iface_name
-            )
+            anyhow::anyhow!("interface '{iface_name}' does not exist — check 'interface' or 'default_interface' in config")
         } else {
             e
         }
@@ -239,7 +234,7 @@ pub async fn add_routes_from_dir(
 
     let mut json_files: Vec<String> = Vec::new();
     let entries =
-        std::fs::read_dir(dir_path).with_context(|| format!("read directory {}", dir.display()))?;
+        std::fs::read_dir(dir_path).with_context(|| format!("read directory {}", dir_path.display()))?;
 
     for entry in entries {
         let entry = entry?;
@@ -284,7 +279,7 @@ pub async fn add_routes_from_dir(
         let handle_ref = &handle;
         let stats_ref = &stats;
 
-        stream::iter(destinations.into_iter())
+        stream::iter(destinations)
             .for_each_concurrent(concurrency, |dest| async move {
                 // Determine which gateway to use based on destination IP version.
                 // We only need to distinguish IPv4 vs IPv6 here; full parsing is done in add_route.
@@ -303,13 +298,15 @@ pub async fn add_routes_from_dir(
                 let route_gw: Option<IpAddr> = if is_ipv4 {
                     gw.filter(|g| g.is_ipv4())
                 } else {
-                    // For IPv6 on TUN interfaces, don't use gateway if it's assigned to the interface itself
-                    // TUN interfaces need interface-only routes
-                    if iface_name.contains("tun") {
-                        tracing::debug!("TUN interface detected, using interface-only IPv6 route for {dest}");
-                        None
-                    } else {
-                        gw6.filter(|g| g.is_ipv6()).or_else(|| gw.filter(|g| g.is_ipv6()))
+                    // For IPv6: use gateway6 if set and IPv6, otherwise report error
+                    match gw6 {
+                        Some(gw6_ip) if gw6_ip.is_ipv6() => Some(gw6_ip),
+                        _ => {
+                            // No valid IPv6 gateway - cannot route IPv6 traffic
+                            tracing::error!("No IPv6 gateway configured for IPv6 destination {dest}");
+                            stats_ref.add_error("no_ipv6_gateway");
+                            return;
+                        }
                     }
                 };
 

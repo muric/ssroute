@@ -72,10 +72,10 @@ pub async fn ensure_plugin_available(plugin: &str) -> Result<()> {
         .stderr(std::process::Stdio::null())
         .status()
         .await
-        .with_context(|| format!("failed to exec plugin: {}", plugin))?;
+        .with_context(|| format!("failed to exec plugin: {plugin}"))?;
 
     if !status.success() {
-        bail!("plugin '{}' is not available (exit status={})", plugin, status);
+        bail!("plugin '{plugin}' is not available (exit status={status})");
     }
     Ok(())
 }

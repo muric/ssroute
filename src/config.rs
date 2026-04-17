@@ -75,7 +75,7 @@ pub fn read_config(path: &Path) -> Result<Config> {
     let mut config = Config::default();
 
     for (line_num, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| format!("read line {}", line_num + 1))?;
+        let line = line.with_context(|| format!("read line {line_num}"))?;
         let line = line.trim().to_string();
 
         if line.is_empty() || line.starts_with('#') {
@@ -102,26 +102,26 @@ pub fn read_config(path: &Path) -> Result<Config> {
             "goroutine_count" | "concurrency" => {
                 config.concurrency = value
                     .parse()
-                    .with_context(|| format!("invalid concurrency value '{value}'"))?;
+                    .with_context(|| format!("invalid concurrency value {value}"))?;
             }
             "debug" => {
                 config.debug = parse_bool(value)
-                    .with_context(|| format!("invalid debug value '{value}'"))?;
+                    .with_context(|| format!("invalid debug value {value}"))?;
             }
             "mtu" => {
                 config.mtu = value
                     .parse()
-                    .with_context(|| format!("invalid mtu value '{value}'"))?;
+                    .with_context(|| format!("invalid mtu value {value}"))?;
             }
             "ss_enabled" => {
                 config.ss_enabled = parse_bool(value)
-                    .with_context(|| format!("invalid ss_enabled value '{value}'"))?;
+                    .with_context(|| format!("invalid ss_enabled value {value}"))?;
             }
             "ss_server" => config.ss_server = value.to_string(),
             "ss_server_port" => {
                 config.ss_server_port = value
                     .parse()
-                    .with_context(|| format!("invalid ss_server_port value '{value}'"))?;
+                    .with_context(|| format!("invalid ss_server_port value {value}"))?;
             }
             "ss_password" => config.ss_password = value.to_string(),
             "ss_method" => config.ss_method = value.to_string(),
