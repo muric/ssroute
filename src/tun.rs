@@ -10,7 +10,7 @@ use crate::config::{Config, ObfsMode};
 pub fn calculate_mtu(config: &Config) -> u16 {
     if config.mtu > 0 {
         config.mtu
-    } else if matches!(config.obfs_mode, ObfsMode::Xray | ObfsMode::SimpleObfs) {
+    } else if config.obfs_mode == ObfsMode::SimpleObfs || !config.ss_plugin.is_empty() {
         1350 // Reduced MTU for obfuscation plugins
     } else {
         1500 // Default MTU
