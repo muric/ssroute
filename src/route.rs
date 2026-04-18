@@ -3,6 +3,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use futures::TryStreamExt;
+use futures_util::stream::{self, StreamExt};
 
 /// Add a single route via netlink.
 /// Returns Ok(()) if route added or already exists, Err only for real errors.
@@ -187,13 +188,13 @@ async fn get_iface_index(handle: &rtnetlink::Handle, name: &str) -> Result<u32> 
 /// Add routes from all .json files in a directory.
 ///
 /// Each .json file contains a JSON array of IP/CIDR strings.
-/// Routes are added in parallel, limited by `concurrency`.
+/// Routes are added in parallel within each file, limited by `concurrency`.
 pub async fn add_routes_from_dir(
     dir: &Path,
     gateway: &str,
     gateway6: &str,
     iface_name: &str,
-    _concurrency: usize,
+    concurrency: usize,
 ) -> Result<()> {
     let dir_path = dir;
     if !dir_path.exists() {
@@ -280,30 +281,36 @@ pub async fn add_routes_from_dir(
             }
         };
 
-        for dest in destinations {
-            let is_ipv4 = match dest.split('/').next() {
-                Some(ip_part) if !ip_part.is_empty() => !ip_part.contains(':'),
-                _ => {
-                    tracing::error!("Invalid destination format {dest}");
-                    continue;
+        let handle_ref = &handle;
+        let gw_ref = &gw;
+        let gw6_ref = &gw6;
+
+        stream::iter(destinations)
+            .for_each_concurrent(concurrency, |dest| async move {
+                let is_ipv4 = match dest.split('/').next() {
+                    Some(ip_part) if !ip_part.is_empty() => !ip_part.contains(':'),
+                    _ => {
+                        tracing::error!("Invalid destination format {dest}");
+                        return;
+                    }
+                };
+
+                let route_gw: Option<IpAddr> = if is_ipv4 {
+                    gw_ref.filter(|g| g.is_ipv4())
+                } else if iface_name.starts_with("tun") {
+                    tracing::debug!(
+                        "TUN interface detected, using interface-only IPv6 route for {dest}"
+                    );
+                    None
+                } else {
+                    gw6_ref.or_else(|| gw_ref.filter(|g| g.is_ipv6()))
+                };
+
+                if let Err(e) = add_route(handle_ref, &dest, route_gw, iface_index).await {
+                    tracing::error!("Failed to add route {dest}: {e}");
                 }
-            };
-
-            let route_gw: Option<IpAddr> = if is_ipv4 {
-                gw.filter(|g| g.is_ipv4())
-            } else if iface_name.starts_with("tun") {
-                tracing::debug!(
-                    "TUN interface detected, using interface-only IPv6 route for {dest}"
-                );
-                None
-            } else {
-                gw6.or_else(|| gw.filter(|g| g.is_ipv6()))
-            };
-
-            if let Err(e) = add_route(&handle, &dest, route_gw, iface_index).await {
-                tracing::error!("Failed to add route {dest}: {e}");
-            }
-        }
+            })
+            .await;
     }
 
     Ok(())

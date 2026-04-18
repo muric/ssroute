@@ -9,6 +9,7 @@
   - [Требования](#ru-requirements)
   - [Установка](#ru-installation)
   - [Конфигурация](#ru-configuration)
+  - [Сборка на macOS](#ru-macos-build)
   - [Файлы маршрутов](#ru-route-files)
   - [Запуск](#ru-usage)
   - [systemd-сервис](#ru-systemd)
@@ -22,6 +23,7 @@
   - [Requirements](#en-requirements)
   - [Installation](#en-installation)
   - [Configuration](#en-configuration)
+  - [Building on macOS](#en-macos-build)
   - [Route Files](#en-route-files)
   - [Running](#en-usage)
   - [systemd Service](#en-systemd)
@@ -144,6 +146,29 @@ cp ssroute.conf.example ssroute.conf
 sudo ./target/release/ssroute
 ```
 
+#### Сборка на macOS
+
+<a id="ru-macos-build"></a>
+
+Проект использует Linux-специфичные зависимости (`systemd`, `rtnetlink`, `/dev/net/tun`), поэтому на macOS нативно не скомпилируется. Используйте Docker для разработки:
+
+```bash
+# 1. Собрать образ (один раз)
+make image
+
+# 2. Проверка кода
+make check       # cargo check
+make clippy      # cargo clippy --all-targets
+
+# 3. Сборка релиза
+make build-docker  # cargo build --release
+
+# Или вручную:
+docker run --rm -v $(pwd):/app -w /app ssroute-builder cargo build --release
+```
+
+Результат сборки появится в `target/` на хосте, так как volume mount пробрасывает весь проект.
+
 <a id="ru-configuration"></a>
 ### Конфигурация
 
@@ -204,7 +229,7 @@ obfs_mode=disable
 | `interface` | Имя TUN-интерфейса (например `tun2`) | (обязательный) |
 | `default_gw` | Шлюз (IPv4 или IPv6) для маршрутов из `default_route/` | (опционально) |
 | `default_interface` | Интерфейс для маршрутов из `default_route/` | (опционально) |
-| `concurrency`, `goroutine_count` | Количество параллельных воркеров для загрузки маршрутов | `4` |
+| `concurrency`, `goroutine_count` | Резервируется для будущего использования | `4` |
 | `mtu` | MTU для TUN-интерфейса (0 = авто 1500) | `0` |
 | `ss_enabled` | Включить daemon-режим с Shadowsocks | `false` |
 | `ss_server` | Адрес Shadowsocks-сервера | (обязательный при SS) |
@@ -663,6 +688,29 @@ cp ssroute.conf.example ssroute.conf
 sudo ./target/release/ssroute
 ```
 
+#### Building on macOS
+
+<a id="en-macos-build"></a>
+
+This project uses Linux-specific dependencies (`systemd`, `rtnetlink`, `/dev/net/tun`) and cannot be compiled natively on macOS. Use Docker for development:
+
+```bash
+# 1. Build the image (once)
+make image
+
+# 2. Check code
+make check       # cargo check
+make clippy      # cargo clippy --all-targets
+
+# 3. Build release
+make build-docker  # cargo build --release
+
+# Or manually:
+docker run --rm -v $(pwd):/app -w /app ssroute-builder cargo build --release
+```
+
+The build output appears in `target/` on the host since the volume mount shares the entire project.
+
 <a id="en-configuration"></a>
 ### Configuration
 
@@ -724,7 +772,7 @@ obfs_mode=disable
 | `interface` | TUN interface name (e.g. `tun2`) | (required) |
 | `default_gw` | Gateway (IPv4 or IPv6) for routes in `default_route/` dir | (optional) |
 | `default_interface` | Interface for routes in `default_route/` dir | (optional) |
-| `concurrency`, `goroutine_count` | Parallel workers for route loading | `4` |
+| `concurrency`, `goroutine_count` | Reserved for future use | `4` |
 | `mtu` | TUN MTU (0 = auto 1500) | `0` |
 | `ss_enabled` | Enable Shadowsocks daemon mode | `false` |
 | `ss_server` | Shadowsocks server address | (required if SS enabled) |
