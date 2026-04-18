@@ -291,7 +291,7 @@ pub async fn add_routes_from_dir(
 
             let route_gw: Option<IpAddr> = if is_ipv4 {
                 gw.filter(|g| g.is_ipv4())
-            } else if iface_name.contains("tun") {
+            } else if iface_name.starts_with("tun") {
                 tracing::debug!(
                     "TUN interface detected, using interface-only IPv6 route for {dest}"
                 );
@@ -302,7 +302,6 @@ pub async fn add_routes_from_dir(
 
             if let Err(e) = add_route(&handle, &dest, route_gw, iface_index).await {
                 tracing::error!("Failed to add route {dest}: {e}");
-                bail!("Failed to add route {dest}: {e}");
             }
         }
     }

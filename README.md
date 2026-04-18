@@ -442,20 +442,6 @@ ping -c 3 91.108.4.1
 curl -I https://www.google.com
 ```
 
-**Статистика загрузки маршрутов:**
-
-После загрузки маршрутов ssroute выводит сводную статистику в лог:
-
-```
-========== Statistics ==========
-Successfully added: 12345
-Already existed (skipped): 42
-Total processed: 12387
-================================
-```
-
-Дублирующиеся маршруты (уже существующие в системе) записываются в файл `/tmp/route_duplicates_<timestamp>.log` для диагностики.
-
 **Диагностика V2Ray/XRay плагина (если используется):**
 
 При использовании xray плагина важно убедиться, что плагин работает корректно:
@@ -975,20 +961,6 @@ If the route for this IP goes through the TUN interface (listed in `data/`), the
 ```bash
 curl -I https://www.google.com
 ```
-
-**Route loading statistics:**
-
-After loading routes, ssroute prints a summary to the log:
-
-```
-========== Statistics ==========
-Successfully added: 12345
-Already existed (skipped): 42
-Total processed: 12387
-================================
-```
-
-Duplicate routes (already present in the kernel) are written to `/tmp/route_duplicates_<timestamp>.log` for diagnostics.
 
 **V2Ray/XRay Plugin Diagnostics (if used):**
 
