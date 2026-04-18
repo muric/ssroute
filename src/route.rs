@@ -303,7 +303,8 @@ pub async fn add_routes_from_dir(
                     );
                     None
                 } else {
-                    gw6_ref.or_else(|| gw_ref.filter(|g| g.is_ipv6()))
+                    // gw6 must be IPv6 — don't fall back to gw if it isn't
+                    gw6_ref.filter(|g| g.is_ipv6()).or_else(|| gw_ref.filter(|g| g.is_ipv6()))
                 };
 
                 if let Err(e) = add_route(handle_ref, &dest, route_gw, iface_index).await {

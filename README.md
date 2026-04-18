@@ -229,7 +229,7 @@ obfs_mode=disable
 | `interface` | Имя TUN-интерфейса (например `tun2`) | (обязательный) |
 | `default_gw` | Шлюз (IPv4 или IPv6) для маршрутов из `default_route/` | (опционально) |
 | `default_interface` | Интерфейс для маршрутов из `default_route/` | (опционально) |
-| `concurrency`, `goroutine_count` | Резервируется для будущего использования | `4` |
+| `concurrency`, `goroutine_count` | Количество параллельных воркеров для загрузки маршрутов | `4` |
 | `mtu` | MTU для TUN-интерфейса (0 = авто 1500) | `0` |
 | `ss_enabled` | Включить daemon-режим с Shadowsocks | `false` |
 | `ss_server` | Адрес Shadowsocks-сервера | (обязательный при SS) |
@@ -772,7 +772,7 @@ obfs_mode=disable
 | `interface` | TUN interface name (e.g. `tun2`) | (required) |
 | `default_gw` | Gateway (IPv4 or IPv6) for routes in `default_route/` dir | (optional) |
 | `default_interface` | Interface for routes in `default_route/` dir | (optional) |
-| `concurrency`, `goroutine_count` | Reserved for future use | `4` |
+| `concurrency`, `goroutine_count` | Parallel workers for route loading | `4` |
 | `mtu` | TUN MTU (0 = auto 1500) | `0` |
 | `ss_enabled` | Enable Shadowsocks daemon mode | `false` |
 | `ss_server` | Shadowsocks server address | (required if SS enabled) |

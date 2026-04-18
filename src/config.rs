@@ -119,7 +119,8 @@ pub fn read_config(path: &Path) -> Result<Config> {
                     .with_context(|| format!("invalid mtu value '{value}'"))?;
             }
             "ss_enabled" => {
-                config.ss_enabled = parse_bool(value)?;
+                config.ss_enabled = parse_bool(value)
+                    .with_context(|| format!("invalid ss_enabled value '{value}'"))?;
             }
             "ss_server" => config.ss_server = value.to_string(),
             "ss_server_port" => {
