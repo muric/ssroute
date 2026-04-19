@@ -120,7 +120,7 @@ obfs_host=www.bing.com
 #   xray-plugin                       (if in PATH)
 #   v2ray-plugin                      (if in PATH, alias for xray mode)
 #   /usr/bin/v2ray-plugin             (absolute path)
-ss_plugin=v2ray-plugin
+ss_plugin=xray-plugin
 
 # Plugin options string (passed via SS_PLUGIN_OPTIONS env to the plugin).
 # Format: semicolon-separated key=value pairs
