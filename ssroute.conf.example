@@ -41,7 +41,7 @@ default_interface=eth0
 # Example: 100, 500, 1000
 concurrency=4
 
-# TUN MTU (0 = auto-detect, default 1500)
+# TUN MTU (default 1500; omit or set 0 to use default)
 # When using obfuscation plugins, reduce to ~1350 due to encapsulation overhead
 # Examples: 1500, 1400, 1350
 mtu=
@@ -91,7 +91,7 @@ obfs_mode=disable
 
 # Host to impersonate when obfuscation is enabled.
 # DPI will see traffic as if it goes to this host.
-# Used by xray mode.
+# Used by xray/v2ray mode.
 # Example: www.bing.com, cloudflare.com
 obfs_host=www.bing.com
 
@@ -120,11 +120,11 @@ obfs_host=www.bing.com
 #   xray-plugin                       (if in PATH)
 #   v2ray-plugin                      (if in PATH, alias for xray mode)
 #   /usr/bin/v2ray-plugin             (absolute path)
-ss_plugin=xray-plugin
+ss_plugin=v2ray-plugin
 
 # Plugin options string (passed via SS_PLUGIN_OPTIONS env to the plugin).
 # Format: semicolon-separated key=value pairs
-# IMPORTANT: ssroute uses xray-plugin as a CLIENT, so use 'client;' prefix.
+# IMPORTANT: ssroute runs the plugin as a CLIENT, so use 'client;' prefix.
 #
 #   HTTP obfuscation (faster, less secure):
 #     client;host=example.com

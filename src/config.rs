@@ -192,8 +192,8 @@ mod tests {
              ss_method=chacha20-ietf-poly1305\n\
              obfs_mode=xray\n\
              obfs_host=www.bing.com\n\
-             ss_plugin=xray-plugin\n\
-             ss_plugin_opts=server;tls;host=example.com\n",
+             ss_plugin=v2ray-plugin\n\
+             ss_plugin_opts=client;tls;host=example.com\n",
         );
         let config = read_config(f.path()).unwrap();
         assert_eq!(config.gateway, "10.0.0.1");
@@ -208,8 +208,8 @@ mod tests {
         assert_eq!(config.ss_method, "chacha20-ietf-poly1305");
         assert_eq!(config.obfs_mode, ObfsMode::Xray);
         assert_eq!(config.obfs_host, "www.bing.com");
-        assert_eq!(config.ss_plugin, "xray-plugin");
-        assert_eq!(config.ss_plugin_opts, "server;tls;host=example.com");
+        assert_eq!(config.ss_plugin, "v2ray-plugin");
+        assert_eq!(config.ss_plugin_opts, "client;tls;host=example.com");
     }
 
     #[test]
