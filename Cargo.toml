@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-shadowsocks-service = { version = "1.24", features = ["local", "local-tun", "aead-cipher-2022"] }
+shadowsocks = { version = "1.24", features = ["aead-cipher-2022"] }
 nix = { version = "0.29", features = ["ioctl", "net", "poll", "signal", "fs"] }
 rtnetlink = "0.14"
 netlink-packet-route = "0.19"

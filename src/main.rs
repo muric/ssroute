@@ -5,13 +5,18 @@ mod tun;
 mod tunnel;
 
 use std::error::Error;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use zbus::{Connection, Proxy};
 
 use anyhow::{bail, Context, Result};
 use config::ObfsMode;
+use shadowsocks::config::{ServerConfig, ServerType};
+use shadowsocks::context::Context as SsContext;
+use shadowsocks::crypto::CipherKind;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_CONFIG_PATHS: &[&str] = &["ssroute.conf", "/etc/ssroute/ssroute.conf"];
@@ -127,14 +132,48 @@ async fn run_oneshot_mode(config: &config::Config, config_dir: &Path) -> Result<
     Ok(())
 }
 
-/// Daemon mode: start SS TUN service, add routes, run forever.
+/// Build a shadowsocks ServerConfig from our app config.
+/// If obfuscation is enabled, starts the plugin and sets plugin_addr.
+fn build_ss_config(
+    config: &config::Config,
+    plugin_local_addr: Option<std::net::SocketAddr>,
+) -> Result<ServerConfig> {
+    let cipher: CipherKind = config
+        .ss_method
+        .parse()
+        .map_err(|_| anyhow::anyhow!("unknown cipher: {}", config.ss_method))?;
+
+    let ss_addr = format!("{}:{}", config.ss_server, config.ss_server_port);
+    let server_addr: shadowsocks::config::ServerAddr = ss_addr
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid SS server address '{ss_addr}': {e:?}"))?;
+
+    let mut svr_cfg = ServerConfig::new(server_addr, &config.ss_password, cipher)
+        .map_err(|e| anyhow::anyhow!("invalid SS config: {e:?}"))?;
+
+    // Configure plugin if needed
+    if let Some(plugin_addr) = plugin_local_addr {
+        svr_cfg.set_plugin_addr(plugin_addr.into());
+    }
+
+    Ok(svr_cfg)
+}
+
+/// Start the shadowsocks context.
+fn build_ss_context() -> shadowsocks::context::SharedContext {
+    let ctx = SsContext::new(ServerType::Local);
+    Arc::new(ctx)
+}
+
+/// Daemon mode: start TUN-to-SS proxy, add routes, run forever.
 async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<()> {
     if config.ss_server.is_empty() || config.ss_server_port == 0 || config.ss_password.is_empty() {
         bail!("Shadowsocks is enabled but ss_server, ss_server_port, or ss_password is not set");
     }
 
-    let mut config = config.clone();
-    let mut plugin_process = None;
+    let config = config.clone();
+    let mut plugin_process: Option<plugin::PluginProcess> = None;
+    let mut plugin_local_addr: Option<std::net::SocketAddr> = None;
 
     match config.obfs_mode {
         ObfsMode::Xray => {
@@ -153,10 +192,11 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
 
             let parts: Vec<&str> = p.local_addr.split(':').collect();
             if parts.len() == 2 {
-                config.ss_server = parts[0].to_string();
-                config.ss_server_port = parts[1].parse().unwrap_or(config.ss_server_port);
+                let local_host: std::net::IpAddr = parts[0].parse()?;
+                let local_port: u16 = parts[1].parse().unwrap_or(config.ss_server_port);
+                plugin_local_addr = Some(SocketAddr::new(local_host, local_port));
+                plugin_process = Some(p);
             }
-            plugin_process = Some(p);
         }
         ObfsMode::SimpleObfs => {
             tracing::info!("Using simple-obfs with host: {}", config.obfs_host);
@@ -164,10 +204,17 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
         ObfsMode::Disable => {}
     }
 
-    let ss_config = tunnel::build_ss_config(&config)?;
+    // Build shadowsocks config and context
+    let svr_cfg = build_ss_config(&config, plugin_local_addr)?;
+    let ctx = build_ss_context();
 
-    let mut service_handle = tokio::spawn(async move { tunnel::run_service(ss_config).await });
+    // Create TUN interface (non-persistent — we keep the fd open)
+    tracing::info!("Creating TUN interface '{}'", config.interface);
+    ensure_networkd_config(&config.interface);
+    let tun_fd = tun::create_tun(&config.interface, false)?
+        .context("TUN interface creation failed — requires root")?;
 
+    // Wait for the interface to appear
     tracing::info!(
         "Waiting for TUN interface '{}' to come up...",
         config.interface
@@ -175,7 +222,7 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
     wait_for_interface(&config.interface).await;
 
     if let Err(e) = setup_unmanaged_interface(&config.interface).await {
-        eprintln!("NetworkManager integration error: {e}");
+        tracing::warn!("NetworkManager integration error: {e}");
     }
 
     // Configure TUN interface: assign IP addresses and MTU
@@ -203,9 +250,21 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
         }
     }
 
+    // Add routes
     add_routes(&config, config_dir).await;
 
-    tracing::info!("Daemon running!!!");
+    // Start the TUN-to-SS proxy (blocks until SIGINT/SIGTERM)
+    tracing::info!("Starting TUN-to-shadowsocks proxy");
+
+    let config_for_tunnel = config.clone();
+    let svr_cfg_for_tunnel = svr_cfg.clone();
+
+    let mut tunnel_task = tokio::spawn(tunnel::run_tun_tproxy(
+        tun_fd,
+        config_for_tunnel,
+        ctx,
+        svr_cfg_for_tunnel,
+    ));
 
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -213,32 +272,31 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
     let result = tokio::select! {
         _ = sigint.recv() => {
             tracing::info!("Received SIGINT, shutting down...");
-            service_handle.abort();
             Ok(())
         }
         _ = sigterm.recv() => {
             tracing::info!("Received SIGTERM, shutting down...");
-            service_handle.abort();
             Ok(())
         }
-        result = &mut service_handle => {
+        result = &mut tunnel_task => {
             match result {
                 Ok(Ok(())) => {
-                    tracing::warn!("SS service exited");
+                    tracing::info!("Proxy exited normally");
                     Ok(())
                 }
                 Ok(Err(e)) => {
-                    tracing::error!("SS service error: {e}");
+                    tracing::error!("Proxy error: {e}");
                     Err(e)
                 }
                 Err(e) => {
-                    tracing::error!("SS service task panicked: {e}");
-                    Err(anyhow::anyhow!("SS service task panicked: {e}"))
+                    tracing::error!("Proxy task panicked: {e}");
+                    Err(anyhow::anyhow!("Proxy task panicked: {e}"))
                 }
             }
         }
     };
 
+    // Stop plugin
     if let Some(mut p) = plugin_process {
         plugin::stop_plugin(&mut p).await;
     }
@@ -373,14 +431,14 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
     let connection = match Connection::system().await {
         Ok(conn) => conn,
         Err(_) => {
-            println!("System D-Bus not found. Skipping NetworkManager integration.");
+            tracing::info!("System D-Bus not found. Skipping NetworkManager integration.");
             return Ok(());
         }
     };
 
     // 2. Check if NM is active to avoid "Service Not Found" errors
     if !is_nm_running(&connection).await {
-        println!("NetworkManager is not running. Nothing to do.");
+        tracing::info!("NetworkManager is not running. Nothing to do.");
         return Ok(());
     }
 
@@ -393,7 +451,7 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
     )
     .await?;
 
-    println!("Waiting for NetworkManager to detect {iface_name}...");
+    tracing::info!("Waiting for NetworkManager to detect {iface_name}...");
 
     // 4. Polling: NM needs a moment to see the new kernel device
     let mut device_path = None;
@@ -413,9 +471,11 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
         }
     }
 
-    let path = device_path.ok_or(format!(
-        "Timeout: NM did not recognize {iface_name} within 3s",
-    ))?;
+    let path = device_path.ok_or_else(|| {
+        format!(
+            "Timeout: NM did not recognize {iface_name} within 3s",
+        )
+    })?;
 
     // 5. Create proxy for the specific device and set 'Managed' to false
     let device_proxy = Proxy::new(
@@ -429,7 +489,7 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
     // Note: set_property handles the type wrapping automatically
     device_proxy.set_property("Managed", false).await?;
 
-    println!("Interface {iface_name} is now UNMANAGED by NetworkManager.");
+    tracing::info!("Interface {iface_name} is now UNMANAGED by NetworkManager.");
     Ok(())
 }
 
