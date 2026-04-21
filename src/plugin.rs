@@ -41,7 +41,9 @@ pub async fn start_plugin(
         cmd.env("SS_PLUGIN_OPTIONS", plugin_opts);
     }
 
-    let child = cmd.spawn().with_context(|| format!("start plugin {plugin}"))?;
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("start plugin {plugin}"))?;
     let pid = child.id().unwrap_or(0);
 
     // Poll-connect until the plugin is ready (up to 5 seconds)
@@ -72,10 +74,12 @@ pub async fn ensure_plugin_available(plugin: &str) -> Result<()> {
         .stderr(std::process::Stdio::null())
         .status()
         .await
-        .with_context(|| format!("failed to exec plugin: {}", plugin))?;
+        .with_context(|| format!("failed to exec plugin: {plugin}"))?;
 
     if !status.success() {
-        bail!("plugin '{}' is not available (exit status={})", plugin, status);
+        bail!(
+            "plugin '{plugin}' is not available (exit status={status})",
+        );
     }
     Ok(())
 }

@@ -3,7 +3,7 @@ INSTALL_DIR := /usr/bin
 CONFIG_DIR := /etc/ssroute
 SYSTEMD_DIR := /lib/systemd/system
 
-.PHONY: all build clean install install-service uninstall deb
+.PHONY: all build clean install install-service uninstall deb image check clippy build-docker
 
 all: build
 
@@ -41,3 +41,19 @@ uninstall:
 	rm -f $(INSTALL_DIR)/$(APP_NAME)
 	systemctl daemon-reload
 	@echo "Uninstalled $(APP_NAME). Config left in $(CONFIG_DIR)/"
+
+# Docker targets — build image once, mount source at runtime
+DOCKER_IMAGE := ssroute-builder
+DOCKER := docker run --rm -v $(CURDIR):/app -w /app $(DOCKER_IMAGE)
+
+image:
+	docker build -t $(DOCKER_IMAGE) -f Dockerfile .
+
+check: image
+	$(DOCKER) cargo check --release
+
+clippy: image
+	$(DOCKER) cargo clippy --all-targets
+
+build-docker: image
+	$(DOCKER) cargo build --release

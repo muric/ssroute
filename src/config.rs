@@ -7,6 +7,17 @@ use anyhow::{bail, Context, Result};
 const DEFAULT_CONCURRENCY: usize = 4;
 const DEFAULT_MTU: u16 = 1500;
 
+/// Parse a boolean string value.
+/// Accepts: true/false, yes/no, 1/0 (case-insensitive).
+/// Returns an error for unknown values to avoid silent misconfiguration.
+pub fn parse_bool(s: &str) -> Result<bool> {
+    match s.to_lowercase().as_str() {
+        "true" | "yes" | "1" => Ok(true),
+        "false" | "no" | "0" => Ok(false),
+        _ => bail!("boolean value expected, got '{s}'"),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObfsMode {
     Disable,
@@ -23,7 +34,6 @@ pub struct Config {
     pub default_gateway: String,
     pub default_interface: String,
     pub concurrency: usize,
-    pub debug: bool,
     pub mtu: u16, // 0 = auto
 
     // Shadowsocks
@@ -51,7 +61,6 @@ impl Default for Config {
             default_gateway: String::new(),
             default_interface: String::new(),
             concurrency: DEFAULT_CONCURRENCY,
-            debug: false,
             mtu: 0,
 
             ss_enabled: false,
@@ -104,10 +113,6 @@ pub fn read_config(path: &Path) -> Result<Config> {
                     .parse()
                     .with_context(|| format!("invalid concurrency value '{value}'"))?;
             }
-            "debug" => {
-                config.debug = parse_bool(value)
-                    .with_context(|| format!("invalid debug value '{value}'"))?;
-            }
             "mtu" => {
                 config.mtu = value
                     .parse()
@@ -148,14 +153,6 @@ pub fn read_config(path: &Path) -> Result<Config> {
     Ok(config)
 }
 
-fn parse_bool(s: &str) -> Result<bool> {
-    match s.to_lowercase().as_str() {
-        "true" | "1" | "yes" => Ok(true),
-        "false" | "0" | "no" => Ok(false),
-        _ => bail!("cannot parse '{s}' as boolean"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,7 +184,6 @@ mod tests {
              default_gw=192.168.1.1\n\
              default_interface=eth0\n\
              concurrency=100\n\
-             debug=true\n\
              mtu=1400\n\
              ss_enabled=true\n\
              ss_server=1.2.3.4\n\
@@ -197,14 +193,13 @@ mod tests {
              obfs_mode=xray\n\
              obfs_host=www.bing.com\n\
              ss_plugin=xray-plugin\n\
-             ss_plugin_opts=server;tls;host=example.com\n",
+             ss_plugin_opts=client;tls;host=example.com\n",
         );
         let config = read_config(f.path()).unwrap();
         assert_eq!(config.gateway, "10.0.0.1");
         assert_eq!(config.default_gateway, "192.168.1.1");
         assert_eq!(config.default_interface, "eth0");
         assert_eq!(config.concurrency, 100);
-        assert!(config.debug);
         assert_eq!(config.mtu, 1400);
         assert!(config.ss_enabled);
         assert_eq!(config.ss_server, "1.2.3.4");
@@ -214,7 +209,7 @@ mod tests {
         assert_eq!(config.obfs_mode, ObfsMode::Xray);
         assert_eq!(config.obfs_host, "www.bing.com");
         assert_eq!(config.ss_plugin, "xray-plugin");
-        assert_eq!(config.ss_plugin_opts, "server;tls;host=example.com");
+        assert_eq!(config.ss_plugin_opts, "client;tls;host=example.com");
     }
 
     #[test]
@@ -245,5 +240,36 @@ mod tests {
         let f = write_temp_config("gateway6=2001:db8::2\ninterface=tun2\n");
         let config = read_config(f.path()).unwrap();
         assert_eq!(config.gateway6, "2001:db8::2");
+    }
+
+    #[test]
+    fn test_ss_enabled_variants() {
+        let test_cases = vec![
+            ("true", true),
+            ("false", false),
+            ("True", true),
+            ("FALSE", false),
+            ("yes", true),
+            ("no", false),
+            ("Yes", true),
+            ("No", false),
+            ("1", true),
+            ("0", false),
+        ];
+        for (input, expected) in test_cases {
+            let f = write_temp_config(&format!("gateway=10.0.0.1\ninterface=tun2\nss_enabled={input}\n"));
+            let config = read_config(f.path()).unwrap();
+            assert_eq!(config.ss_enabled, expected, "ss_enabled={input}");
+        }
+    }
+
+    #[test]
+    fn test_ss_enabled_invalid_value() {
+        let test_cases = vec!["tru", "ye", "Falsey", "1.0", "on", "off"];
+        for input in test_cases {
+            let f = write_temp_config(&format!("gateway=10.0.0.1\ninterface=tun2\nss_enabled={input}\n"));
+            let result = read_config(f.path());
+            assert!(result.is_err(), "ss_enabled={input} should fail");
+        }
     }
 }

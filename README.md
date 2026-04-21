@@ -2,9 +2,6 @@
 
 ## Table of Contents / Оглавление
 
-- **Специальные гайды / Special Guides:**
-  - [🔐 XRay Plugin Setup (DPI Evasion)](V2RAY_SETUP.md) — Полное руководство по настройке XRay / Complete XRay configuration guide
-
 - Русский
   - [Обзор](#ru-overview)
   - [Как это работает](#ru-how-it-works)
@@ -12,6 +9,7 @@
   - [Требования](#ru-requirements)
   - [Установка](#ru-installation)
   - [Конфигурация](#ru-configuration)
+  - [Сборка на macOS](#ru-macos-build)
   - [Файлы маршрутов](#ru-route-files)
   - [Запуск](#ru-usage)
   - [systemd-сервис](#ru-systemd)
@@ -25,6 +23,7 @@
   - [Requirements](#en-requirements)
   - [Installation](#en-installation)
   - [Configuration](#en-configuration)
+  - [Building on macOS](#en-macos-build)
   - [Route Files](#en-route-files)
   - [Running](#en-usage)
   - [systemd Service](#en-systemd)
@@ -147,6 +146,29 @@ cp ssroute.conf.example ssroute.conf
 sudo ./target/release/ssroute
 ```
 
+#### Сборка на macOS
+
+<a id="ru-macos-build"></a>
+
+Проект использует Linux-специфичные зависимости (`systemd`, `rtnetlink`, `/dev/net/tun`), поэтому на macOS нативно не скомпилируется. Используйте Docker для разработки:
+
+```bash
+# 1. Собрать образ (один раз)
+make image
+
+# 2. Проверка кода
+make check       # cargo check
+make clippy      # cargo clippy --all-targets
+
+# 3. Сборка релиза
+make build-docker  # cargo build --release
+
+# Или вручную:
+docker run --rm -v $(pwd):/app -w /app ssroute-builder cargo build --release
+```
+
+Результат сборки появится в `target/` на хосте, так как volume mount пробрасывает весь проект.
+
 <a id="ru-configuration"></a>
 ### Конфигурация
 
@@ -166,7 +188,6 @@ gateway=10.0.0.1
 gateway6=2001:db8::1
 interface=tun2
 concurrency=100
-debug=false
 ss_enabled=false
 ```
 
@@ -178,7 +199,6 @@ gateway=10.0.0.1
 gateway6=2001:db8::1
 interface=tun2
 concurrency=100
-debug=false
 mtu=1400
 
 # Интерфейс по умолчанию (для маршрутов из default_route/)
@@ -197,7 +217,7 @@ obfs_mode=disable
 # obfs_mode=xray
 # obfs_host=www.bing.com
 # ss_plugin=v2ray-plugin
-# ss_plugin_opts=server;tls;host=example.com
+# ss_plugin_opts=client;tls;host=example.com
 ```
 
 **Параметры конфигурации:**
@@ -209,9 +229,8 @@ obfs_mode=disable
 | `interface` | Имя TUN-интерфейса (например `tun2`) | (обязательный) |
 | `default_gw` | Шлюз (IPv4 или IPv6) для маршрутов из `default_route/` | (опционально) |
 | `default_interface` | Интерфейс для маршрутов из `default_route/` | (опционально) |
-| `concurrency` | Количество параллельных воркеров для загрузки маршрутов | `4` |
-| `debug` | Подробное логирование ошибок маршрутизации | `false` |
-| `mtu` | MTU для TUN-интерфейса (0 = авто 1500) | `0` |
+| `concurrency`, `goroutine_count` | Количество параллельных воркеров для загрузки маршрутов | `4` |
+| `mtu` | MTU для TUN-интерфейса (по умолч. 1500; 0 = не задавать) | `0` |
 | `ss_enabled` | Включить daemon-режим с Shadowsocks | `false` |
 | `ss_server` | Адрес Shadowsocks-сервера | (обязательный при SS) |
 | `ss_server_port` | Порт Shadowsocks-сервера | (обязательный при SS) |
@@ -221,6 +240,15 @@ obfs_mode=disable
 | `obfs_host` | Хост для имитации при обфускации | (опционально) |
 | `ss_plugin` | Путь к бинарнику SIP003-плагина | (опционально) |
 | `ss_plugin_opts` | Опции плагина | (опционально) |
+
+#### Интеграция с NetworkManager и systemd-networkd
+
+ssroute интегрируется с NetworkManager и systemd-networkd для предотвращения конфликтов с TUN-интерфейсом:
+
+- **systemd-networkd**: Создаёт `/etc/systemd/network/99-ssroute.network` с `Unmanaged=yes` чтобы интерфейс не управлялся
+- **NetworkManager**: Использует D-Bus для помечания TUN-интерфейса как неуправляемого, обеспечивая что NetworkManager не модифицирует и не переопределяет конфигурацию интерфейса
+
+Эта интеграция автоматическая и не требует дополнительной настройки.
 
 #### Конфигурация XRay (уклонение от DPI)
 
@@ -235,7 +263,7 @@ XRay интегрируется в ssroute через стандарт **SIP003*
    - `SS_REMOTE_PORT` — порт Shadowsocks-сервера
    - `SS_LOCAL_HOST` — локальный адрес для прослушивания (127.0.0.1)
    - `SS_LOCAL_PORT` — свободный локальный порт
-   - `SS_PLUGIN_OPTIONS` — опции плагина (например, `server;tls;host=www.bing.com`)
+   - `SS_PLUGIN_OPTIONS` — опции плагина (например, `client;tls;host=www.bing.com`)
 
 2. **Туннелирование трафика**:
    - Плагин создаёт локальный сокет на `127.0.0.1:SS_LOCAL_PORT`
@@ -245,8 +273,8 @@ XRay интегрируется в ssroute через стандарт **SIP003*
    - Плагин пересылает трафик на реальный Shadowsocks-сервер
 
 3. **Типы обфускации**:
-   - **TLS режим** (`server;tls;host=...`) — трафик выглядит как HTTPS, более безопасно
-   - **HTTP режим** (`server;host=...`) — трафик выглядит как HTTP, быстрее
+   - **TLS режим** (`client;tls;host=...`) — трафик выглядит как HTTPS, более безопасно
+   - **HTTP режим** (`client;host=...`) — трафик выглядит как HTTP, быстрее
    - **Выбор хоста** — используется реальный существующий домен для верификации сертификата
 
 4. **Управление процессом**:
@@ -292,7 +320,7 @@ v2ray-plugin --version
    obfs_mode=xray
    obfs_host=www.bing.com
    ss_plugin=v2ray-plugin
-   ss_plugin_opts=server;tls;host=www.bing.com
+   ss_plugin_opts=client;tls;host=www.bing.com
    ```
 
 2. **HTTP режим (быстрее, менее защищен):**
@@ -300,7 +328,7 @@ v2ray-plugin --version
    obfs_mode=xray
    obfs_host=example.com
    ss_plugin=v2ray-plugin
-   ss_plugin_opts=server;host=example.com
+   ss_plugin_opts=client;host=example.com
    ```
 
 3. **С проверкой сертификата:**
@@ -308,7 +336,7 @@ v2ray-plugin --version
    obfs_mode=xray
    obfs_host=cloudflare.com
    ss_plugin=v2ray-plugin
-   ss_plugin_opts=server;tls;host=cloudflare.com;cert=/etc/ssl/certs/ca-certificates.crt
+   ss_plugin_opts=client;tls;host=cloudflare.com;cert=/etc/ssl/certs/ca-certificates.crt
    ```
 
 **Важные замечания:**
@@ -330,7 +358,7 @@ ss_method=chacha20-ietf-poly1305
 obfs_mode=xray
 obfs_host=www.bing.com
 ss_plugin=v2ray-plugin
-ss_plugin_opts=server;tls;host=www.bing.com
+ss_plugin_opts=client;tls;host=www.bing.com
 mtu=1350
 ```
 
@@ -439,20 +467,6 @@ ping -c 3 91.108.4.1
 curl -I https://www.google.com
 ```
 
-**Статистика загрузки маршрутов:**
-
-После загрузки маршрутов ssroute выводит сводную статистику в лог:
-
-```
-========== Statistics ==========
-Successfully added: 12345
-Already existed (skipped): 42
-Total processed: 12387
-================================
-```
-
-Дублирующиеся маршруты (уже существующие в системе) записываются в файл `/tmp/route_duplicates_<timestamp>.log` для диагностики.
-
 **Диагностика V2Ray/XRay плагина (если используется):**
 
 При использовании xray плагина важно убедиться, что плагин работает корректно:
@@ -494,7 +508,7 @@ export SS_REMOTE_HOST=203.0.113.50
 export SS_REMOTE_PORT=8388
 export SS_LOCAL_HOST=127.0.0.1
 export SS_LOCAL_PORT=5555
-export SS_PLUGIN_OPTIONS="server;tls;host=www.bing.com"
+export SS_PLUGIN_OPTIONS="client;tls;host=www.bing.com"
 v2ray-plugin
 
 # В другом терминале проверить, слушает ли порт
@@ -531,17 +545,20 @@ ps auxe | grep xray-plugin
 Управление уровнем логирования через переменную `RUST_LOG`:
 
 ```bash
-# По умолчанию (info)
+# По умолчанию (info уровень)
 sudo ssroute
 
-# Подробный вывод
+# Подробный вывод (debug)
 sudo RUST_LOG=debug ssroute
 
-# Максимально подробный вывод
+# Максимально подробный вывод (trace)
 sudo RUST_LOG=trace ssroute
 
-# Для конкретного модуля
+# Только для конкретного модуля
 sudo RUST_LOG=ssroute::tunnel=debug ssroute
+
+# Фильтр по нескольким модулям
+sudo RUST_LOG=ssroute::plugin=trace,ssroute::tunnel=debug ssroute
 ```
 
 Если что-то не работает:
@@ -671,6 +688,29 @@ cp ssroute.conf.example ssroute.conf
 sudo ./target/release/ssroute
 ```
 
+#### Building on macOS
+
+<a id="en-macos-build"></a>
+
+This project uses Linux-specific dependencies (`systemd`, `rtnetlink`, `/dev/net/tun`) and cannot be compiled natively on macOS. Use Docker for development:
+
+```bash
+# 1. Build the image (once)
+make image
+
+# 2. Check code
+make check       # cargo check
+make clippy      # cargo clippy --all-targets
+
+# 3. Build release
+make build-docker  # cargo build --release
+
+# Or manually:
+docker run --rm -v $(pwd):/app -w /app ssroute-builder cargo build --release
+```
+
+The build output appears in `target/` on the host since the volume mount shares the entire project.
+
 <a id="en-configuration"></a>
 ### Configuration
 
@@ -690,7 +730,6 @@ gateway=10.0.0.1
 gateway6=2001:db8::1
 interface=tun2
 concurrency=100
-debug=false
 ss_enabled=false
 ```
 
@@ -702,7 +741,6 @@ gateway=10.0.0.1
 gateway6=2001:db8::1
 interface=tun2
 concurrency=100
-debug=false
 mtu=1400
 
 # Default interface (for routes in default_route/)
@@ -722,7 +760,7 @@ obfs_mode=disable
 # obfs_mode=xray
 # obfs_host=www.bing.com
 # ss_plugin=v2ray-plugin
-# ss_plugin_opts=server;tls;host=example.com
+# ss_plugin_opts=client;tls;host=example.com
 ```
 
 **Config parameters:**
@@ -734,9 +772,8 @@ obfs_mode=disable
 | `interface` | TUN interface name (e.g. `tun2`) | (required) |
 | `default_gw` | Gateway (IPv4 or IPv6) for routes in `default_route/` dir | (optional) |
 | `default_interface` | Interface for routes in `default_route/` dir | (optional) |
-| `concurrency` | Parallel workers for route loading | `4` |
-| `debug` | Verbose error logging for routes | `false` |
-| `mtu` | TUN MTU (0 = auto 1500) | `0` |
+| `concurrency`, `goroutine_count` | Parallel workers for route loading | `4` |
+| `mtu` | TUN MTU (default 1500; omit or set 0 to use default) | `0` |
 | `ss_enabled` | Enable Shadowsocks daemon mode | `false` |
 | `ss_server` | Shadowsocks server address | (required if SS enabled) |
 | `ss_server_port` | Shadowsocks server port | (required if SS enabled) |
@@ -746,6 +783,15 @@ obfs_mode=disable
 | `obfs_host` | Host to impersonate for obfuscation | (optional) |
 | `ss_plugin` | Path to SIP003 plugin binary | (optional) |
 | `ss_plugin_opts` | Plugin options string | (optional) |
+
+#### NetworkManager and systemd-networkd Integration
+
+ssroute integrates with NetworkManager and systemd-networkd to prevent interference with the TUN interface:
+
+- **systemd-networkd**: Creates `/etc/systemd/network/99-ssroute.network` with `Unmanaged=yes` to keep the interface from being managed
+- **NetworkManager**: Uses D-Bus to mark the TUN interface as unmanaged, ensuring NetworkManager does not modify or override the interface configuration
+
+This integration is automatic and does not require any additional configuration.
 
 #### XRay Configuration (DPI Evasion)
 
@@ -760,7 +806,7 @@ XRay integrates into ssroute through the **SIP003** standard (Shadowsocks Plugin
    - `SS_REMOTE_PORT` — port of the Shadowsocks server
    - `SS_LOCAL_HOST` — local address to listen on (127.0.0.1)
    - `SS_LOCAL_PORT` — a free ephemeral local port
-   - `SS_PLUGIN_OPTIONS` — plugin options (e.g., `server;tls;host=www.bing.com`)
+   - `SS_PLUGIN_OPTIONS` — plugin options (e.g., `client;tls;host=www.bing.com`)
 
 2. **Traffic Tunneling**:
    - The plugin creates a local socket listening on `127.0.0.1:SS_LOCAL_PORT`
@@ -770,8 +816,8 @@ XRay integrates into ssroute through the **SIP003** standard (Shadowsocks Plugin
    - The plugin relays encrypted traffic to the real Shadowsocks server
 
 3. **Obfuscation Modes**:
-   - **TLS mode** (`server;tls;host=...`) — traffic looks like HTTPS, more secure
-   - **HTTP mode** (`server;host=...`) — traffic looks like HTTP, faster
+   - **TLS mode** (`client;tls;host=...`) — traffic looks like HTTPS, more secure
+   - **HTTP mode** (`client;host=...`) — traffic looks like HTTP, faster
    - **Host selection** — uses a real existing domain for certificate verification
 
 4. **Process Management**:
@@ -817,7 +863,7 @@ v2ray-plugin --version
    obfs_mode=xray
    obfs_host=www.bing.com
    ss_plugin=v2ray-plugin
-   ss_plugin_opts=server;tls;host=www.bing.com
+   ss_plugin_opts=client;tls;host=www.bing.com
    ```
 
 2. **HTTP mode (faster, less secure):**
@@ -825,7 +871,7 @@ v2ray-plugin --version
    obfs_mode=xray
    obfs_host=example.com
    ss_plugin=v2ray-plugin
-   ss_plugin_opts=server;host=example.com
+   ss_plugin_opts=client;host=example.com
    ```
 
 3. **With certificate verification:**
@@ -833,7 +879,7 @@ v2ray-plugin --version
    obfs_mode=xray
    obfs_host=cloudflare.com
    ss_plugin=v2ray-plugin
-   ss_plugin_opts=server;tls;host=cloudflare.com;cert=/etc/ssl/certs/ca-certificates.crt
+   ss_plugin_opts=client;tls;host=cloudflare.com;cert=/etc/ssl/certs/ca-certificates.crt
    ```
 
 **Important Notes:**
@@ -855,7 +901,7 @@ ss_method=chacha20-ietf-poly1305
 obfs_mode=xray
 obfs_host=www.bing.com
 ss_plugin=v2ray-plugin
-ss_plugin_opts=server;tls;host=www.bing.com
+ss_plugin_opts=client;tls;host=www.bing.com
 mtu=1350
 ```
 
@@ -964,20 +1010,6 @@ If the route for this IP goes through the TUN interface (listed in `data/`), the
 curl -I https://www.google.com
 ```
 
-**Route loading statistics:**
-
-After loading routes, ssroute prints a summary to the log:
-
-```
-========== Statistics ==========
-Successfully added: 12345
-Already existed (skipped): 42
-Total processed: 12387
-================================
-```
-
-Duplicate routes (already present in the kernel) are written to `/tmp/route_duplicates_<timestamp>.log` for diagnostics.
-
 **V2Ray/XRay Plugin Diagnostics (if used):**
 
 When using the xray plugin, verify the plugin is working correctly:
@@ -1019,7 +1051,7 @@ export SS_REMOTE_HOST=203.0.113.50
 export SS_REMOTE_PORT=8388
 export SS_LOCAL_HOST=127.0.0.1
 export SS_LOCAL_PORT=5555
-export SS_PLUGIN_OPTIONS="server;tls;host=www.bing.com"
+export SS_PLUGIN_OPTIONS="client;tls;host=www.bing.com"
 v2ray-plugin
 
 # In another terminal, verify the port is listening
@@ -1065,8 +1097,11 @@ sudo RUST_LOG=debug ssroute
 # Trace level (very verbose)
 sudo RUST_LOG=trace ssroute
 
-# Module-specific
+# Module-specific logging
 sudo RUST_LOG=ssroute::tunnel=debug ssroute
+
+# Multiple modules with different levels
+sudo RUST_LOG=ssroute::plugin=trace,ssroute::tunnel=debug ssroute
 ```
 
 If something is not working:

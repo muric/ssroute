@@ -1,16 +1,14 @@
 mod config;
 mod plugin;
 mod route;
-mod stats;
 mod tun;
 mod tunnel;
 
+use std::error::Error;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use zbus::{Connection, Proxy};
-use std::error::Error;
 
 use anyhow::{bail, Context, Result};
 use config::ObfsMode;
@@ -37,18 +35,16 @@ async fn main() -> Result<()> {
         println!("  --help, -h       Print this help and exit");
         println!();
         println!("Environment:");
-        println!("  RUST_LOG         Log level (default: info). Example: RUST_LOG=debug");
+        println!("  RUST_LOG=debug   Enable verbose debug logging");
         return Ok(());
     }
 
     let config_path = parse_config_flag(&args)?;
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Init logging BEFORE parsing config (for config parsing errors)
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     // Find config file
     let config_path = find_config(&config_path)?;
@@ -118,14 +114,15 @@ async fn run_oneshot_mode(config: &config::Config, config_dir: &Path) -> Result<
     tun::create_tun(&config.interface, true)?;
 
     tracing::info!("Setting gateway IP and MTU={} on TUN interface", config.mtu);
-    tun::configure_tun(&config.interface, &config.gateway, &config.gateway6, config.mtu).await?;
+    tun::configure_tun(
+        &config.interface,
+        &config.gateway,
+        &config.gateway6,
+        config.mtu,
+    )
+    .await?;
 
-    let stats = Arc::new(stats::Stats::new());
-    add_routes(config, config_dir, &stats).await;
-    stats.print_stats();
-    if let Some(mut s) = Arc::into_inner(stats) {
-        s.shutdown().await;
-    }
+    add_routes(config, config_dir).await;
 
     Ok(())
 }
@@ -171,17 +168,32 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
 
     let mut service_handle = tokio::spawn(async move { tunnel::run_service(ss_config).await });
 
-    tracing::info!("Waiting for TUN interface '{}' to come up...", config.interface);
+    tracing::info!(
+        "Waiting for TUN interface '{}' to come up...",
+        config.interface
+    );
     wait_for_interface(&config.interface).await;
-    
+
     if let Err(e) = setup_unmanaged_interface(&config.interface).await {
-        eprintln!("NetworkManager integration error: {}", e);
+        eprintln!("NetworkManager integration error: {e}");
     }
 
     // Configure TUN interface: assign IP addresses and MTU
-    tracing::info!("Configuring TUN interface {} with gateway={}, gateway6={}, mtu={}", 
-        config.interface, config.gateway, config.gateway6, config.mtu);
-    if let Err(e) = tun::configure_tun(&config.interface, &config.gateway, &config.gateway6, config.mtu).await {
+    tracing::info!(
+        "Configuring TUN interface {} with gateway={}, gateway6={}, mtu={}",
+        config.interface,
+        config.gateway,
+        config.gateway6,
+        config.mtu
+    );
+    if let Err(e) = tun::configure_tun(
+        &config.interface,
+        &config.gateway,
+        &config.gateway6,
+        config.mtu,
+    )
+    .await
+    {
         tracing::warn!("Failed to configure TUN interface: {e}");
     }
 
@@ -190,24 +202,8 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
             tracing::warn!("Failed to set MTU (backup): {e}");
         }
     }
-    
-    let stats = Arc::new(stats::Stats::new());
-    add_routes(&config, config_dir, &stats).await;
-    stats.print_stats();
-    // Shut down stats promptly: routes are added only at startup, no need to
-    // hold the writer task and channel buffer alive for the daemon lifetime.
-    match Arc::try_unwrap(stats) {
-        Ok(mut s) => {
-            s.shutdown().await;
-        }
-        Err(arc) => {
-            tracing::warn!(
-                "Stats Arc still has {} strong references; \
-                 writer task/channel will remain running until process exit",
-                Arc::strong_count(&arc)
-            );
-        }
-    }
+
+    add_routes(&config, config_dir).await;
 
     tracing::info!("Daemon running!!!");
 
@@ -251,18 +247,20 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
 }
 
 /// Add routes from data/ and default_route/ relative to config_dir.
-async fn add_routes(config: &config::Config, config_dir: &Path, stats: &Arc<stats::Stats>) {
+async fn add_routes(config: &config::Config, config_dir: &Path) {
     if !config.interface.is_empty() && (!config.gateway.is_empty() || !config.gateway6.is_empty()) {
         let dir = config_dir.join("data");
-        tracing::info!("Adding routes for interface: {} from {}", config.interface, dir.display());
+        tracing::info!(
+            "Adding routes for interface: {} from {}",
+            config.interface,
+            dir.display()
+        );
         if let Err(e) = route::add_routes_from_dir(
             &dir,
             &config.gateway,
             &config.gateway6,
             &config.interface,
             config.concurrency,
-            config.debug,
-            stats,
         )
         .await
         {
@@ -272,15 +270,17 @@ async fn add_routes(config: &config::Config, config_dir: &Path, stats: &Arc<stat
 
     if !config.default_interface.is_empty() && !config.default_gateway.is_empty() {
         let dir = config_dir.join("default_route");
-        tracing::info!("Adding routes for default interface: {} from {}", config.default_interface, dir.display());
+        tracing::info!(
+            "Adding routes for default interface: {} from {}",
+            config.default_interface,
+            dir.display()
+        );
         if let Err(e) = route::add_routes_from_dir(
             &dir,
             &config.default_gateway,
-            "", // no separate IPv6 gateway for default routes
+            "",
             &config.default_interface,
             config.concurrency,
-            config.debug,
-            stats,
         )
         .await
         {
@@ -393,7 +393,7 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
     )
     .await?;
 
-    println!("Waiting for NetworkManager to detect {}...", iface_name);
+    println!("Waiting for NetworkManager to detect {iface_name}...");
 
     // 4. Polling: NM needs a moment to see the new kernel device
     let mut device_path = None;
@@ -413,7 +413,9 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
         }
     }
 
-    let path = device_path.ok_or(format!("Timeout: NM did not recognize {} within 3s", iface_name))?;
+    let path = device_path.ok_or(format!(
+        "Timeout: NM did not recognize {iface_name} within 3s",
+    ))?;
 
     // 5. Create proxy for the specific device and set 'Managed' to false
     let device_proxy = Proxy::new(
@@ -427,7 +429,7 @@ async fn setup_unmanaged_interface(iface_name: &str) -> Result<(), Box<dyn Error
     // Note: set_property handles the type wrapping automatically
     device_proxy.set_property("Managed", false).await?;
 
-    println!("Interface {} is now UNMANAGED by NetworkManager.", iface_name);
+    println!("Interface {iface_name} is now UNMANAGED by NetworkManager.");
     Ok(())
 }
 
@@ -439,17 +441,15 @@ async fn is_nm_running(conn: &Connection) -> bool {
         "/org/freedesktop/DBus",
         "org.freedesktop.DBus",
     )
-    .await {
+    .await
+    {
         Ok(p) => p,
         Err(_) => return false,
     };
 
     // zbus 4.x call syntax: <MethodName, BodyTuple, ReturnType>
     dbus_proxy
-        .call::<&str, (&str,), bool>(
-            "NameHasOwner",
-            &("org.freedesktop.NetworkManager",),
-        )
+        .call::<&str, (&str,), bool>("NameHasOwner", &("org.freedesktop.NetworkManager",))
         .await
         .unwrap_or(false)
 }

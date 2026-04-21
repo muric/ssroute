@@ -48,7 +48,7 @@ pub fn build_ss_config(config: &Config) -> Result<SsConfig> {
              Please set at least one gateway in ssroute.conf"
         ));
     };
-    
+
     let addr_cidr = format!("{}/{}", addr, if addr.contains(':') { 64 } else { 24 });
     local.tun_interface_address = Some(
         addr_cidr
