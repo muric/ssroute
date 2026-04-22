@@ -297,14 +297,9 @@ pub async fn add_routes_from_dir(
 
                 let route_gw: Option<IpAddr> = if is_ipv4 {
                     gw_ref.filter(|g| g.is_ipv4())
-                } else if iface_name.starts_with("tun") {
-                    tracing::debug!(
-                        "TUN interface detected, using interface-only IPv6 route for {dest}"
-                    );
-                    None
                 } else {
-                    // gw6 must be IPv6 — don't fall back to gw if it isn't
-                    gw6_ref.filter(|g| g.is_ipv6()).or_else(|| gw_ref.filter(|g| g.is_ipv6()))
+                    // IPv6: prefer gateway6, fall back to gateway if it's IPv6
+                    gw6_ref.filter(|g| g.is_ipv6())
                 };
 
                 if let Err(e) = add_route(handle_ref, &dest, route_gw, iface_index).await {

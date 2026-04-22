@@ -1,7 +1,8 @@
 //! TUN-to-shadowsocks proxy using native tokio TCP sockets.
 //!
-//! Reads raw IP packets from a TUN interface, demultiplexes TCP/UDP,
+//! Reads raw IP packets from a TUN interface, demultiplexes TCP,
 //! and forwards them through encrypted shadowsocks streams.
+//! UDP support via shadowsocks UDP relay is not yet implemented.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -72,7 +73,6 @@ fn parse_ip_packet(buf: &[u8]) -> Option<IpHeader> {
         return None;
     }
 
-    // Need enough bytes for transport header
     let needed = match protocol {
         6 => 40,  // IPv4(20) + TCP(20)
         17 => 28, // IPv4(20) + UDP(8)
@@ -113,7 +113,7 @@ fn parse_ip_packet(buf: &[u8]) -> Option<IpHeader> {
     })
 }
 
-// ── Connection tracking ──────────────────────────────────────────
+// ── Connection tracking ─────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
 struct ConnKey {
@@ -155,13 +155,13 @@ fn ip_to_u128(ip: IpAddr) -> u128 {
     }
 }
 
-/// Active connection with stream and bookkeeping.
+/// Active TCP connection.
 struct ActiveConn {
     stream: ProxyClientStream<SsTcpStream>,
     last_active: std::time::Instant,
 }
 
-// ── IP response packet builder ───────────────────────────────────
+// ── IP response packet builder ─────────────────────────────────
 
 /// Build a response IP packet by swapping src/dst addresses and ports.
 fn build_response_packet(
@@ -193,8 +193,8 @@ fn build_response_packet(
                 original.protocol,
                 0x00, 0x00,              // checksum (0 = kernel computes)
             ]);
-            packet.extend_from_slice(&dst_ip); // src = TUN IP
-            packet.extend_from_slice(&src_ip); // dst = server IP
+            packet.extend_from_slice(&dst_ip);
+            packet.extend_from_slice(&src_ip);
 
             match original.protocol {
                 6 => {
@@ -276,7 +276,7 @@ fn build_response_packet(
     Ok(packet)
 }
 
-// ── Main tunnel loop ─────────────────────────────────────────────
+// ── Main tunnel loop ──────────────────────────────────────────
 
 /// Run the TUN-to-shadowsocks proxy.
 pub async fn run_tun_tproxy(
@@ -285,23 +285,20 @@ pub async fn run_tun_tproxy(
     ctx: SharedContext,
     svr_cfg: ServerConfig,
 ) -> Result<()> {
-    // Convert OwnedFd to a std::fs::File for blocking read() calls.
     let tun_fd_raw = tun_fd.as_raw_fd();
     let tun_file = unsafe { std::fs::File::from_raw_fd(tun_fd_raw) };
-    // Forget the OwnedFd so the file owns the fd
     std::mem::forget(tun_fd);
 
     let mut connections: HashMap<ConnKey, ActiveConn> = HashMap::new();
     let mut read_buf = [0u8; 65536];
 
     loop {
-        // Read next IP packet from TUN (blocking syscall → spawn_blocking)
         let mut tun_clone = tun_file.try_clone()?;
         let n = match tokio::task::spawn_blocking(move || tun_clone.read(&mut read_buf))
             .await
             .unwrap_or(Ok(0))
         {
-            Ok(0) => break, // EOF
+            Ok(0) => break,
             Ok(n) if n > 0 => n,
             Ok(_) => continue,
             Err(e) => {
@@ -317,6 +314,12 @@ pub async fn run_tun_tproxy(
             None => continue,
         };
 
+        // Only handle TCP for now — UDP relay requires reverse mapping
+        // and is not supported with plugins
+        if hdr.protocol != 6 {
+            continue;
+        }
+
         let transport_start = hdr.header_len as usize;
         let payload = &packet[transport_start..];
         let rev_key = ConnKey::from_ip(&hdr, hdr.src_port, hdr.dst_port).reversed();
@@ -327,18 +330,13 @@ pub async fn run_tun_tproxy(
 
                 if !payload.is_empty() {
                     if let Err(e) = conn.stream.write_all(payload).await {
-                        tracing::warn!("Stream write failed: {e}, removing connection");
+                        tracing::warn!("TCP stream write failed: {e}, removing connection");
                         connections.remove(&rev_key);
                         continue;
                     }
                 }
 
-                read_and_forward_responses(
-                    &mut conn.stream,
-                    &hdr,
-                    &rev_key,
-                )
-                .await;
+                read_and_forward_responses(&mut conn.stream, &hdr, &rev_key).await;
             }
             None => {
                 let target = match (hdr.version, &hdr.dst, hdr.dst_port) {
@@ -355,7 +353,7 @@ pub async fn run_tun_tproxy(
                         .map(|(k, _)| *k)
                     {
                         connections.remove(&oldest);
-                        tracing::debug!("Evicted oldest connection (limit: {MAX_CONNECTIONS})");
+                        tracing::debug!("Evicted oldest TCP connection (limit: {MAX_CONNECTIONS})");
                     }
                 }
 
@@ -368,7 +366,7 @@ pub async fn run_tun_tproxy(
                 {
                     Ok(Ok(mut stream)) => {
                         tracing::debug!(
-                            "New connection: {}:{} → {}",
+                            "New TCP connection: {}:{} → {}",
                             hdr.dst,
                             hdr.dst_port,
                             svr_cfg.addr(),
@@ -376,7 +374,7 @@ pub async fn run_tun_tproxy(
 
                         if !payload.is_empty() {
                             if let Err(e) = stream.write_all(&payload).await {
-                                tracing::warn!("Initial write failed: {e}");
+                                tracing::warn!("Initial TCP write failed: {e}");
                                 continue;
                             }
                         }
@@ -390,10 +388,10 @@ pub async fn run_tun_tproxy(
                         );
                     }
                     Ok(Err(e)) => {
-                        tracing::warn!("Failed to create connection to {}: {e}", target);
+                        tracing::warn!("Failed to create TCP connection to {}: {e}", target);
                     }
                     Err(_) => {
-                        tracing::warn!("Connection to {} timed out", target);
+                        tracing::warn!("TCP connection to {} timed out", target);
                     }
                 }
             }
@@ -404,7 +402,6 @@ pub async fn run_tun_tproxy(
 }
 
 /// Try to read response data from the encrypted stream and write to TUN.
-/// Uses a 0ms timeout to avoid blocking if no data is available.
 async fn read_and_forward_responses(
     stream: &mut ProxyClientStream<SsTcpStream>,
     hdr: &IpHeader,
@@ -416,7 +413,7 @@ async fn read_and_forward_responses(
         Ok(Ok(0)) => return,
         Ok(Ok(n)) => n,
         Ok(Err(e)) => {
-            tracing::warn!("Response read failed: {e}");
+            tracing::warn!("TCP response read failed: {e}");
             return;
         }
         Err(_) => return, // timeout
@@ -432,11 +429,10 @@ async fn read_and_forward_responses(
         }
     };
 
-    // Write to TUN — open and write, fd stays open
+    // Write to TUN
     let mut tun_file = std::fs::File::open("/dev/net/tun")
         .expect("TUN fd should be open");
     if let Err(e) = tun_file.write_all(&response_pkt) {
         tracing::warn!("Failed to write response to TUN: {e}");
     }
 }
-
