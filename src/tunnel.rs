@@ -19,7 +19,7 @@ use shadowsocks::relay::socks5::Address;
 use shadowsocks::relay::tcprelay::proxy_stream::ProxyClientStream;
 use shadowsocks::relay::udprelay::proxy_socket::ProxySocket;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{split, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -184,7 +184,7 @@ fn ip_to_u128(ip: IpAddr) -> u128 {
 
 /// Active TCP connection.
 struct TcpConn {
-    stream: ProxyClientStream<SsTcpStream>,
+    write_half: tokio::io::WriteHalf<ProxyClientStream<SsTcpStream>>,
     last_active: std::time::Instant,
 }
 
@@ -473,14 +473,11 @@ async fn handle_tcp_packet(
             conn.last_active = std::time::Instant::now();
 
             if !payload.is_empty() {
-                if let Err(e) = conn.stream.write_all(payload).await {
+                if let Err(e) = conn.write_half.write_all(payload).await {
                     tracing::warn!("TCP stream write failed: {e}, removing connection");
                     tcp_connections.remove(rev_key);
-                    return;
                 }
             }
-
-            read_and_forward_tcp_responses(&mut conn.stream, tun_fd, hdr, rev_key).await;
         }
         None => {
             let target = match (hdr.version, &hdr.dst, hdr.dst_port) {
@@ -508,7 +505,8 @@ async fn handle_tcp_packet(
             )
             .await
             {
-                Ok(Ok(mut stream)) => {
+                Ok(Ok(stream)) => {
+                    let (read_half, mut write_half) = split(stream);
                     tracing::debug!(
                         "New TCP connection: {}:{} → {}",
                         hdr.dst,
@@ -517,16 +515,28 @@ async fn handle_tcp_packet(
                     );
 
                     if !payload.is_empty() {
-                        if let Err(e) = stream.write_all(&payload).await {
+                        if let Err(e) = write_half.write_all(&payload).await {
                             tracing::warn!("Initial TCP write failed: {e}");
                             return;
                         }
                     }
 
+                    // Spawn per-connection reader: continuously drain SS stream → TUN
+                    let tun_clone = tun_fd.try_clone().ok();
+                    let key = *rev_key;
+                    if let Some(tun_fd) = tun_clone {
+                        tokio::spawn(tcp_reader_task(
+                            read_half,
+                            tun_fd,
+                            *hdr,
+                            key,
+                        ));
+                    }
+
                     tcp_connections.insert(
                         *rev_key,
                         TcpConn {
-                            stream,
+                            write_half,
                             last_active: std::time::Instant::now(),
                         },
                     );
@@ -537,6 +547,36 @@ async fn handle_tcp_packet(
                 Err(_) => {
                     tracing::warn!("TCP connection to {} timed out", target);
                 }
+            }
+        }
+    }
+}
+
+/// Per-connection reader: continuously read from SS stream and write to TUN.
+/// Runs until the stream closes or errors.
+async fn tcp_reader_task(
+    mut stream: tokio::io::ReadHalf<ProxyClientStream<SsTcpStream>>,
+    tun_fd: OwnedFd,
+    hdr: IpHeader,
+    rev_key: ConnKey,
+) {
+    let mut resp_buf = [0u8; 65536];
+    loop {
+        match stream.read(&mut resp_buf).await {
+            Ok(0) => {
+                // Stream closed (EOF)
+                tracing::debug!("TCP stream EOF for {:?}, removing connection", rev_key);
+                return;
+            }
+            Ok(n) => {
+                let resp_data = &resp_buf[..n];
+                if let Ok(pkt) = build_response_packet(resp_data, &hdr, &rev_key) {
+                    write_to_tun(&tun_fd, &pkt).await;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("TCP stream read error for {:?}: {e}", rev_key);
+                return;
             }
         }
     }
@@ -656,39 +696,6 @@ async fn udp_response_reader(
             Err(_) => continue, // timeout, keep reading
         }
     }
-}
-
-/// Try to read TCP response data from the encrypted stream and write to TUN.
-/// Only reads once — if no data is immediately available, returns without blocking.
-async fn read_and_forward_tcp_responses(
-    stream: &mut ProxyClientStream<SsTcpStream>,
-    tun_fd: &OwnedFd,
-    hdr: &IpHeader,
-    rev_key: &ConnKey,
-) {
-    let mut resp_buf = [0u8; 32768];
-    // Single non-blocking read: if data is available (server responded), forward it.
-    // Otherwise yields immediately — no busy-wait.
-    let n = match stream.read(&mut resp_buf).await {
-        Ok(0) => return,
-        Ok(n) => n,
-        Err(e) => {
-            tracing::warn!("TCP response read failed: {e}");
-            return;
-        }
-    };
-
-    let resp_data = &resp_buf[..n];
-
-    let response_pkt = match build_response_packet(resp_data, hdr, rev_key) {
-        Ok(pkt) => pkt,
-        Err(e) => {
-            tracing::warn!("Failed to build response packet: {e}");
-            return;
-        }
-    };
-
-    write_to_tun(tun_fd, &response_pkt).await;
 }
 
 // ── Tests ──────────────────────────────────────────────────────
