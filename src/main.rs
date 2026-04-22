@@ -1,4 +1,5 @@
 mod config;
+mod netlink;
 mod plugin;
 mod route;
 mod tun;
@@ -349,7 +350,7 @@ async fn add_routes(config: &config::Config, config_dir: &Path) {
 
 async fn wait_for_interface(name: &str) {
     for i in 0..20 {
-        if interface_exists(name).await {
+        if netlink::interface_exists(name).await {
             tracing::info!("Interface {name} is up");
             return;
         }
@@ -361,36 +362,22 @@ async fn wait_for_interface(name: &str) {
     tracing::warn!("Interface {name} did not appear within 10 seconds, adding routes anyway");
 }
 
-async fn interface_exists(name: &str) -> bool {
-    let (connection, handle, _) = match rtnetlink::new_connection() {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let conn_handle = tokio::spawn(connection);
-    let mut links = handle.link().get().match_name(name.to_string()).execute();
-    use futures::TryStreamExt;
-    let result = links.try_next().await.ok().flatten().is_some();
-    conn_handle.abort();
-    result
-}
-
 async fn set_mtu(name: &str, mtu: u16) -> Result<()> {
-    let (connection, handle, _) = rtnetlink::new_connection()?;
-    let conn_handle = tokio::spawn(connection);
-
-    use futures::TryStreamExt;
-    let mut links = handle.link().get().match_name(name.to_string()).execute();
-    if let Some(link) = links.try_next().await? {
-        handle
-            .link()
-            .set(link.header.index)
-            .mtu(mtu as u32)
-            .execute()
-            .await?;
-    }
-
-    conn_handle.abort();
-    Ok(())
+    let name = name.to_string();
+    netlink::with_handle(move |handle| async move {
+        use futures::TryStreamExt;
+        let mut links = handle.link().get().match_name(name.clone()).execute();
+        if let Some(link) = links.try_next().await? {
+            handle
+                .link()
+                .set(link.header.index)
+                .mtu(mtu as u32)
+                .execute()
+                .await?;
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// Create systemd-networkd config so networkd does not interfere with the TUN interface.
