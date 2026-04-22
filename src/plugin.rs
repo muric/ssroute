@@ -6,6 +6,7 @@ use tokio::process::Command;
 /// A running SIP003-compatible plugin process.
 pub struct PluginProcess {
     child: tokio::process::Child,
+    _listener: Option<tokio::net::TcpListener>,
     pub local_addr: String,
 }
 
@@ -25,7 +26,7 @@ pub async fn start_plugin(
     remote_host: &str,
     remote_port: u16,
 ) -> Result<PluginProcess> {
-    let local_port = find_free_port().await?;
+    let (local_port, listener) = find_free_port().await?;
     let local_host = "127.0.0.1";
     let local_addr = format!("{local_host}:{local_port}");
 
@@ -63,7 +64,11 @@ pub async fn start_plugin(
 
     tracing::info!("Plugin {plugin} started (pid={pid}), listening on {local_addr}");
 
-    Ok(PluginProcess { child, local_addr })
+    Ok(PluginProcess {
+        child,
+        _listener: Some(listener),
+        local_addr,
+    })
 }
 
 /// Ensure the plugin binary is available and executable.
@@ -143,9 +148,8 @@ pub async fn stop_plugin(process: &mut PluginProcess) {
     }
 }
 
-async fn find_free_port() -> Result<u16> {
+async fn find_free_port() -> Result<(u16, tokio::net::TcpListener)> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
+    Ok((port, listener))
 }

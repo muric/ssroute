@@ -18,9 +18,10 @@ use shadowsocks::net::TcpStream as SsTcpStream;
 use shadowsocks::relay::socks5::Address;
 use shadowsocks::relay::tcprelay::proxy_stream::ProxyClientStream;
 use shadowsocks::relay::udprelay::proxy_socket::ProxySocket;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
-use tokio::time::{timeout, timeout_at, Instant};
+use tokio::time::timeout;
 
 use crate::config::Config;
 
@@ -202,125 +203,131 @@ fn build_response_packet(
     original: &IpHeader,
     rev_key: &ConnKey,
 ) -> Result<Vec<u8>> {
-    let mut packet = Vec::with_capacity(payload.len() + 60);
+    let transport_hdr_len = if original.protocol == 6 { 20 } else { 8 };
+    let mut packet = Vec::with_capacity(payload.len() + if original.version == 4 { 28 } else { 52 });
 
     match original.version {
-        4 => {
-            let dst_ip = match &original.dst {
-                IpAddr::V4(v) => v.octets(),
-                _ => bail!("expected IPv4, got IPv6"),
-            };
-            let src_ip = match &original.src {
-                IpAddr::V4(v) => v.octets(),
-                _ => bail!("expected IPv4, got IPv6"),
-            };
-
-            let total_len = (payload.len() + 20 + if original.protocol == 6 { 20 } else { 8 }) as u16;
-            packet.extend_from_slice(&[
-                0x45,                    // version=4, IHL=5
-                0x00,                    // ToS
-                (total_len >> 8) as u8, (total_len & 0xff) as u8,
-                0x00, 0x00,              // identification
-                0x40, 0x00,              // DF flag
-                64,                      // TTL
-                original.protocol,
-                0x00, 0x00,              // checksum (0 = kernel computes)
-            ]);
-            packet.extend_from_slice(&dst_ip);
-            packet.extend_from_slice(&src_ip);
-
-            match original.protocol {
-                6 => {
-                    let sport = rev_key.sport.to_be_bytes();
-                    let dport = rev_key.dport.to_be_bytes();
-                    packet.extend_from_slice(&[
-                        sport[0], sport[1],
-                        dport[0], dport[1],
-                        0x00, 0x00, 0x00, 0x00,
-                        0x50, 0x00,
-                        0xff, 0xff,
-                        0x00, 0x00,
-                        0x00, 0x00,
-                    ]);
-                }
-                17 => {
-                    let sport = rev_key.sport.to_be_bytes();
-                    let dport = rev_key.dport.to_be_bytes();
-                    let udp_len = (8 + payload.len()) as u16;
-                    packet.extend_from_slice(&[
-                        sport[0], sport[1],
-                        dport[0], dport[1],
-                        (udp_len >> 8) as u8, (udp_len & 0xff) as u8,
-                        0x00, 0x00,
-                    ]);
-                }
-                _ => bail!("unsupported protocol: {}", original.protocol),
-            }
-
-            packet.extend_from_slice(payload);
-        }
-        6 => {
-            let src_ip_raw = rev_key.src_ip.to_be_bytes();
-            let dst_ip_raw = rev_key.dst_ip.to_be_bytes();
-            let transport_header_len = if original.protocol == 6 { 20 } else { 8 };
-            let ipv6_payload_len = (transport_header_len + payload.len()) as u16;
-
-            packet.extend_from_slice(&[
-                0x60, 0x00, 0x00, 0x00,
-                (ipv6_payload_len >> 8) as u8, (ipv6_payload_len & 0xff) as u8,
-                original.protocol,
-                64, // hop limit
-            ]);
-            packet.extend_from_slice(&src_ip_raw);
-            packet.extend_from_slice(&dst_ip_raw);
-
-            match original.protocol {
-                6 => {
-                    let sport = rev_key.sport.to_be_bytes();
-                    let dport = rev_key.dport.to_be_bytes();
-                    packet.extend_from_slice(&[
-                        sport[0], sport[1],
-                        dport[0], dport[1],
-                        0x00, 0x00, 0x00, 0x00,
-                        0x50, 0x00,
-                        0xff, 0xff,
-                        0x00, 0x00,
-                        0x00, 0x00,
-                    ]);
-                }
-                17 => {
-                    let sport = rev_key.sport.to_be_bytes();
-                    let dport = rev_key.dport.to_be_bytes();
-                    let udp_len = (8 + payload.len()) as u16;
-                    packet.extend_from_slice(&[
-                        sport[0], sport[1],
-                        dport[0], dport[1],
-                        (udp_len >> 8) as u8, (udp_len & 0xff) as u8,
-                        0x00, 0x00,
-                    ]);
-                }
-                _ => bail!("unsupported protocol: {}", original.protocol),
-            }
-
-            packet.extend_from_slice(payload);
-        }
-        _ => bail!("unsupported IP version: {}", original.version),
+        4 => build_ipv4(&mut packet, payload, original, rev_key, transport_hdr_len)?,
+        6 => build_ipv6(&mut packet, payload, original, rev_key, transport_hdr_len)?,
+        v => bail!("unsupported IP version: {v}"),
     }
-
     Ok(packet)
 }
 
-/// Write a packet to the TUN interface.
-fn write_to_tun(packet: &[u8]) {
-    match std::fs::File::open("/dev/net/tun") {
-        Ok(mut tun_file) => {
-            if let Err(e) = tun_file.write_all(packet) {
-                tracing::warn!("Failed to write response to TUN: {e}");
+fn build_ipv4(
+    buf: &mut Vec<u8>,
+    payload: &[u8],
+    hdr: &IpHeader,
+    rev: &ConnKey,
+    transport_hdr_len: usize,
+) -> Result<()> {
+    let dst_ip = match &hdr.dst {
+        IpAddr::V4(v) => v.octets(),
+        _ => bail!("expected IPv4, got IPv6"),
+    };
+    let src_ip = match &hdr.src {
+        IpAddr::V4(v) => v.octets(),
+        _ => bail!("expected IPv4, got IPv6"),
+    };
+
+    let total_len = (payload.len() + 20 + transport_hdr_len) as u16;
+    buf.extend_from_slice(&[
+        0x45,                // version=4, IHL=5
+        0x00,                // ToS
+        (total_len >> 8) as u8, (total_len & 0xff) as u8,
+        0x00, 0x00,          // identification
+        0x40, 0x00,          // DF flag
+        64,                  // TTL
+        hdr.protocol,
+        0x00, 0x00,          // checksum (0 = kernel computes)
+    ]);
+    buf.extend_from_slice(&dst_ip);
+    buf.extend_from_slice(&src_ip);
+    buf.extend_transport_header(rev, payload.len(), hdr.protocol);
+    buf.extend_from_slice(payload);
+    Ok(())
+}
+
+fn build_ipv6(
+    buf: &mut Vec<u8>,
+    payload: &[u8],
+    hdr: &IpHeader,
+    rev: &ConnKey,
+    transport_hdr_len: usize,
+) -> Result<()> {
+    let src_ip_raw = rev.src_ip.to_be_bytes();
+    let dst_ip_raw = rev.dst_ip.to_be_bytes();
+    let ipv6_payload_len = (transport_hdr_len + payload.len()) as u16;
+
+    buf.extend_from_slice(&[
+        0x60, 0x00, 0x00, 0x00,
+        (ipv6_payload_len >> 8) as u8, (ipv6_payload_len & 0xff) as u8,
+        hdr.protocol,
+        64, // hop limit
+    ]);
+    buf.extend_from_slice(&src_ip_raw);
+    buf.extend_from_slice(&dst_ip_raw);
+    buf.extend_transport_header(rev, payload.len(), hdr.protocol);
+    buf.extend_from_slice(payload);
+    Ok(())
+}
+
+/// Write TCP or UDP transport header with swapped ports.
+trait TransportHeaderExt {
+    fn extend_transport_header(&mut self, rev: &ConnKey, payload_len: usize, protocol: u8);
+}
+
+impl TransportHeaderExt for Vec<u8> {
+    fn extend_transport_header(&mut self, rev: &ConnKey, payload_len: usize, protocol: u8) {
+        let sport = rev.sport.to_be_bytes();
+        let dport = rev.dport.to_be_bytes();
+        match protocol {
+            6 => { // TCP
+                self.extend_from_slice(&[
+                    sport[0], sport[1], dport[0], dport[1],
+                    0x00, 0x00, 0x00, 0x00, // seq, ack
+                    0x50, 0x00,             // data offset, flags
+                    0xff, 0xff,             // window
+                    0x00, 0x00,             // checksum
+                    0x00, 0x00,             // urgent
+                ]);
             }
+            17 => { // UDP
+                let udp_len = (8 + payload_len) as u16;
+                self.extend_from_slice(&[
+                    sport[0], sport[1], dport[0], dport[1],
+                    (udp_len >> 8) as u8, (udp_len & 0xff) as u8,
+                    0x00, 0x00, // checksum
+                ]);
+            }
+            _ => unreachable!(),
         }
+    }
+}
+
+/// Write a packet to the TUN interface via spawn_blocking.
+/// Unlike the old approach (File::open per packet), this reuses the existing fd
+/// via try_clone + spawn_blocking — no syscall to open /dev/net/tun each time.
+async fn write_to_tun(tun_fd: &OwnedFd, packet: &[u8]) {
+    if packet.is_empty() {
+        return;
+    }
+    let owned = match tun_fd.try_clone() {
+        Ok(fd) => fd,
         Err(e) => {
-            tracing::warn!("Failed to open TUN device: {e}");
+            tracing::warn!("Failed to clone TUN fd: {e}");
+            return;
         }
+    };
+    let pkt = packet.to_vec(); // Copy so spawn_blocking owns the data
+    if let Err(e) = tokio::task::spawn_blocking(move || {
+        let mut file = unsafe { std::fs::File::from_raw_fd(owned.as_raw_fd()) };
+        std::mem::forget(owned);
+        file.write_all(&pkt)
+    })
+    .await
+    {
+        tracing::warn!("TUN write task panicked: {e}");
     }
 }
 
@@ -338,15 +345,15 @@ fn resolve_server_addr(svr_cfg: &ServerConfig) -> SocketAddr {
 // ── Main tunnel loop ───────────────────────────────────────────
 
 /// Run the TUN-to-shadowsocks proxy.
+#[allow(unreachable_code)]
 pub async fn run_tun_tproxy(
     tun_fd: OwnedFd,
     _config: Config,
     ctx: SharedContext,
     svr_cfg: ServerConfig,
 ) -> Result<()> {
-    let tun_fd_raw = tun_fd.as_raw_fd();
-    let tun_file = unsafe { std::fs::File::from_raw_fd(tun_fd_raw) };
-    std::mem::forget(tun_fd);
+    // Clone the fd once for write_to_tun (pass to async tasks).
+    let tun_fd_for_writer = tun_fd.try_clone()?;
 
     // TCP connections: reversed key → TCP state
     let mut tcp_connections: HashMap<ConnKey, TcpConn> = HashMap::new();
@@ -381,39 +388,34 @@ pub async fn run_tun_tproxy(
     let udp_socket = Arc::new(udp_socket);
 
     // Channel for UDP responses from the reader task
-    let (resp_tx, mut resp_rx) = mpsc::channel::<(Vec<u8>, IpHeader, ConnKey)>(256);
+    let (_resp_tx, mut resp_rx) = mpsc::channel::<(Vec<u8>, IpHeader, ConnKey)>(256);
 
     // Spawn UDP response reader task
-    let udp_reader = {
+    let _udp_reader = {
         let us = udp_socket.clone();
-        let tx = resp_tx;
         let udp_conns = udp_connections.clone();
+        let tun_clone = tun_fd_for_writer.try_clone()?;
         tokio::spawn(async move {
-            udp_response_reader(us, tx, udp_conns).await
+            udp_response_reader(us, udp_conns, tun_clone).await
         })
     };
 
     let mut read_buf = [0u8; 65536];
 
     loop {
-        let mut tun_clone = tun_file.try_clone()?;
-        let n = match tokio::task::spawn_blocking(move || tun_clone.read(&mut read_buf))
-            .await
-            .unwrap_or(Ok(0))
-        {
-            Ok(0) => break,
-            Ok(n) if n > 0 => n,
-            Ok(_) => continue,
-            Err(e) => {
-                tracing::error!("TUN read error: {e}");
-                continue;
-            }
-        };
+        let owned = tun_fd.try_clone()?;
+        let n = tokio::task::spawn_blocking(move || {
+            let mut file = unsafe { std::fs::File::from_raw_fd(owned.as_raw_fd()) };
+            std::mem::forget(owned);
+            file.read(&mut read_buf)
+        })
+        .await
+        .unwrap_or(Ok(0))?;
 
         // Drain UDP response channel before processing TUN packets
         while let Ok((payload, hdr, rev_key)) = resp_rx.try_recv() {
             if let Ok(pkt) = build_response_packet(&payload, &hdr, &rev_key) {
-                write_to_tun(&pkt);
+                write_to_tun(&tun_fd, &pkt).await;
             }
         }
 
@@ -431,6 +433,7 @@ pub async fn run_tun_tproxy(
         match hdr.protocol {
             6 => handle_tcp_packet(
                 &mut tcp_connections,
+                &tun_fd,
                 &hdr,
                 payload,
                 &rev_key,
@@ -453,21 +456,12 @@ pub async fn run_tun_tproxy(
         }
     }
 
-    // Drain remaining UDP responses
-    while let Some((payload, hdr, rev_key)) = resp_rx.recv().await {
-        if let Ok(pkt) = build_response_packet(&payload, &hdr, &rev_key) {
-            write_to_tun(&pkt);
-        }
-    }
-
-    // Cancel UDP reader task
-    udp_reader.abort();
-
     Ok(())
 }
 
 async fn handle_tcp_packet(
     tcp_connections: &mut HashMap<ConnKey, TcpConn>,
+    tun_fd: &OwnedFd,
     hdr: &IpHeader,
     payload: &[u8],
     rev_key: &ConnKey,
@@ -486,7 +480,7 @@ async fn handle_tcp_packet(
                 }
             }
 
-            read_and_forward_tcp_responses(&mut conn.stream, hdr, rev_key).await;
+            read_and_forward_tcp_responses(&mut conn.stream, tun_fd, hdr, rev_key).await;
         }
         None => {
             let target = match (hdr.version, &hdr.dst, hdr.dst_port) {
@@ -621,11 +615,11 @@ async fn handle_udp_packet(
 }
 
 /// Background task: continuously read UDP responses from the shadowsocks server
-/// and forward them through the response channel.
+/// and write them directly to the TUN interface.
 async fn udp_response_reader(
     udp_socket: Arc<ProxySocket<shadowsocks::net::UdpSocket>>,
-    resp_tx: mpsc::Sender<(Vec<u8>, IpHeader, ConnKey)>,
     udp_connections: Arc<std::sync::Mutex<HashMap<ConnKey, UdpConnMeta>>>,
+    tun_fd: OwnedFd,
 ) {
     let mut buf = [0u8; 65536];
     loop {
@@ -650,12 +644,8 @@ async fn udp_response_reader(
                 };
 
                 if let Some(meta) = conn_info {
-                    if resp_tx
-                        .send((buf[.._payload_len].to_vec(), meta.hdr, meta.rev_key))
-                        .await
-                        .is_err()
-                    {
-                        break; // Channel closed
+                    if let Ok(pkt) = build_response_packet(&buf[.._payload_len], &meta.hdr, &meta.rev_key) {
+                        write_to_tun(&tun_fd, &pkt).await;
                     }
                 }
             }
@@ -669,21 +659,23 @@ async fn udp_response_reader(
 }
 
 /// Try to read TCP response data from the encrypted stream and write to TUN.
+/// Only reads once — if no data is immediately available, returns without blocking.
 async fn read_and_forward_tcp_responses(
     stream: &mut ProxyClientStream<SsTcpStream>,
+    tun_fd: &OwnedFd,
     hdr: &IpHeader,
     rev_key: &ConnKey,
 ) {
     let mut resp_buf = [0u8; 32768];
-    let deadline = Instant::now() + Duration::from_millis(1);
-    let n = match timeout_at(deadline, stream.read(&mut resp_buf)).await {
-        Ok(Ok(0)) => return,
-        Ok(Ok(n)) => n,
-        Ok(Err(e)) => {
+    // Single non-blocking read: if data is available (server responded), forward it.
+    // Otherwise yields immediately — no busy-wait.
+    let n = match stream.read(&mut resp_buf).await {
+        Ok(0) => return,
+        Ok(n) => n,
+        Err(e) => {
             tracing::warn!("TCP response read failed: {e}");
             return;
         }
-        Err(_) => return, // timeout
     };
 
     let resp_data = &resp_buf[..n];
@@ -696,7 +688,7 @@ async fn read_and_forward_tcp_responses(
         }
     };
 
-    write_to_tun(&response_pkt);
+    write_to_tun(tun_fd, &response_pkt).await;
 }
 
 // ── Tests ──────────────────────────────────────────────────────
@@ -831,7 +823,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_tcp_response_payload_length() {
-        let mut original = IpHeader {
+        let original = IpHeader {
             version: 6,
             src: IpAddr::V6("fe80::1".parse().unwrap()),
             dst: IpAddr::V6("2001:db8::1".parse().unwrap()),
@@ -852,7 +844,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_udp_response_payload_length() {
-        let mut original = IpHeader {
+        let original = IpHeader {
             version: 6,
             src: IpAddr::V6("fe80::1".parse().unwrap()),
             dst: IpAddr::V6("2001:db8::1".parse().unwrap()),
@@ -873,7 +865,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_tcp_response_total_length() {
-        let mut original = IpHeader {
+        let original = IpHeader {
             version: 4,
             src: IpAddr::V4("10.0.0.1".parse().unwrap()),
             dst: IpAddr::V4("1.2.3.4".parse().unwrap()),
@@ -894,7 +886,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_udp_response_total_length() {
-        let mut original = IpHeader {
+        let original = IpHeader {
             version: 4,
             src: IpAddr::V4("10.0.0.1".parse().unwrap()),
             dst: IpAddr::V4("1.2.3.4".parse().unwrap()),
@@ -942,7 +934,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_response_address_swap() {
-        let mut original = IpHeader {
+        let original = IpHeader {
             version: 4,
             src: IpAddr::V4("10.0.0.1".parse().unwrap()),
             dst: IpAddr::V4("1.2.3.4".parse().unwrap()),
@@ -966,7 +958,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_response_address_swap() {
-        let mut original = IpHeader {
+        let original = IpHeader {
             version: 6,
             src: IpAddr::V6("2001:db8::1".parse().unwrap()),
             dst: IpAddr::V6("2001:db8::2".parse().unwrap()),
