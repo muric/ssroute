@@ -25,6 +25,74 @@ use tokio::time::timeout;
 
 use crate::config::Config;
 
+// ── Checksum computation (standard RFC 1071 one's complement) ──
+
+/// Compute IPv4 header checksum.
+fn ipv4_checksum(data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut i = 0;
+    while i < data.len() {
+        sum += (data[i] as u32) << 8;
+        if i + 1 < data.len() {
+            sum += data[i + 1] as u32;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    while sum > 0xffff {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !sum as u16
+}
+
+/// Compute TCP/UDP checksum with pseudo-header.
+fn tcp_checksum(
+    src: &IpAddr,
+    dst: &IpAddr,
+    protocol: u8,
+    data: &[u8], // TCP header (with checksum=0 at offset 16-17) + payload
+) -> u16 {
+    let mut sum: u32 = 0;
+
+    // Pseudo-header: source IP + dest IP + protocol + TCP length
+    match (src, dst) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => {
+            sum += u32::from_be_bytes(s.octets());
+            sum += u32::from_be_bytes(d.octets());
+        }
+        (IpAddr::V6(s), IpAddr::V6(d)) => {
+            for b in s.octets().chunks(2) {
+                sum += u32::from(b[0]) << 8 | u32::from(b[1]);
+            }
+            for b in d.octets().chunks(2) {
+                sum += u32::from(b[0]) << 8 | u32::from(b[1]);
+            }
+        }
+        _ => unreachable!("mixed IPv4/IPv6"),
+    }
+    sum += u32::from(protocol) << 8;
+    sum += u32::from(data.len() as u16);
+
+    // TCP header + payload (checksum field at offset 16-17 is already 0)
+    let mut i = 0;
+    while i < data.len() {
+        sum += u32::from(data[i]) << 8;
+        if i + 1 < data.len() {
+            sum += u32::from(data[i + 1]);
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+
+    // Fold carries
+    while sum > 0xffff {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !sum as u16
+}
+
 /// Maximum concurrent connections before eviction.
 const MAX_CONNECTIONS: usize = 4096;
 
@@ -260,18 +328,29 @@ fn build_tcp_response_packet(
     }
 }
 
-/// Build a UDP response IP packet by swapping src/dst addresses and ports.
+/// Build a response IP packet by swapping src/dst addresses and ports.
 fn build_response_packet(
     payload: &[u8],
     original: &IpHeader,
     rev_key: &ConnKey,
 ) -> Result<Vec<u8>> {
-    let transport_hdr_len = if original.protocol == 6 { 20 } else { 8 };
-    let mut packet = Vec::with_capacity(payload.len() + if original.version == 4 { 28 } else { 52 });
+    match original.protocol {
+        6 => build_tcp_response_packet(payload, original, rev_key, 0, 0),
+        17 => build_udp_response_packet(payload, original, rev_key),
+        v => bail!("unsupported protocol: {v}"),
+    }
+}
 
-    match original.version {
-        4 => build_ipv4(&mut packet, payload, original, rev_key, transport_hdr_len)?,
-        6 => build_ipv6(&mut packet, payload, original, rev_key, transport_hdr_len)?,
+fn build_udp_response_packet(
+    payload: &[u8],
+    hdr: &IpHeader,
+    rev: &ConnKey,
+) -> Result<Vec<u8>> {
+    let mut packet = Vec::with_capacity(payload.len() + if hdr.version == 4 { 28 } else { 52 });
+
+    match hdr.version {
+        4 => build_udp_ipv4(&mut packet, payload, hdr, rev)?,
+        6 => build_udp_ipv6(&mut packet, payload, hdr, rev)?,
         v => bail!("unsupported IP version: {v}"),
     }
     Ok(packet)
@@ -296,6 +375,8 @@ fn build_tcp_ipv4_packet(
     };
 
     let total_len = (payload.len() + 20 + transport_hdr_len) as u16;
+
+    // Build IP header with checksum field = 0
     let mut pkt = Vec::with_capacity(total_len as usize);
     pkt.extend_from_slice(&[
         0x45,                // version=4, IHL=5
@@ -305,12 +386,25 @@ fn build_tcp_ipv4_packet(
         0x40, 0x00,          // DF flag
         64,                  // TTL
         hdr.protocol,
-        0x00, 0x00,          // checksum (0 = kernel computes)
+        0x00, 0x00,          // checksum placeholder
     ]);
     pkt.extend_from_slice(&dst_ip);
     pkt.extend_from_slice(&src_ip);
-    extend_tcp_response_header(&mut pkt, rev, tcp_flags, seq, ack, payload.len());
+
+    // Compute IPv4 header checksum (over first 20 bytes with checksum=0)
+    let ip_checksum = ipv4_checksum(&pkt);
+    pkt[10] = (ip_checksum >> 8) as u8;
+    pkt[11] = (ip_checksum & 0xff) as u8;
+
+    // Build TCP header placeholder (checksum = 0) then payload
+    extend_tcp_response_header(&mut pkt, rev, tcp_flags, seq, ack);
     pkt.extend_from_slice(payload);
+
+    // Compute TCP checksum (over pseudo-header + TCP header + payload)
+    let tcp_cksum = tcp_checksum(&hdr.src, &hdr.dst, hdr.protocol, &pkt[20..]);
+    pkt[36] = (tcp_cksum >> 8) as u8;
+    pkt[37] = (tcp_cksum & 0xff) as u8;
+
     Ok(pkt)
 }
 
@@ -336,17 +430,22 @@ fn build_tcp_ipv6_packet(
     ]);
     pkt.extend_from_slice(&src_ip_raw);
     pkt.extend_from_slice(&dst_ip_raw);
-    extend_tcp_response_header(&mut pkt, rev, tcp_flags, seq, ack, payload.len());
+    extend_tcp_response_header(&mut pkt, rev, tcp_flags, seq, ack);
     pkt.extend_from_slice(payload);
+
+    // Compute TCP checksum (mandatory for IPv6)
+    let tcp_cksum = tcp_checksum(&hdr.src, &hdr.dst, hdr.protocol, &pkt[40..]);
+    pkt[56] = (tcp_cksum >> 8) as u8;
+    pkt[57] = (tcp_cksum & 0xff) as u8;
+
     Ok(pkt)
 }
 
-fn build_ipv4(
+fn build_udp_ipv4(
     buf: &mut Vec<u8>,
     payload: &[u8],
     hdr: &IpHeader,
     rev: &ConnKey,
-    transport_hdr_len: usize,
 ) -> Result<()> {
     let dst_ip = match &hdr.dst {
         IpAddr::V4(v) => v.octets(),
@@ -357,8 +456,8 @@ fn build_ipv4(
         _ => bail!("expected IPv4, got IPv6"),
     };
 
-    let total_len = (payload.len() + 20 + transport_hdr_len) as u16;
-    buf.extend_from_slice(&[
+    let total_len = (payload.len() + 20 + 8) as u16;
+    let mut data = vec![
         0x45,                // version=4, IHL=5
         0x00,                // ToS
         (total_len >> 8) as u8, (total_len & 0xff) as u8,
@@ -366,25 +465,37 @@ fn build_ipv4(
         0x40, 0x00,          // DF flag
         64,                  // TTL
         hdr.protocol,
-        0x00, 0x00,          // checksum (0 = kernel computes)
-    ]);
-    buf.extend_from_slice(&dst_ip);
-    buf.extend_from_slice(&src_ip);
+        0x00, 0x00,          // checksum placeholder
+    ];
+    data.extend_from_slice(&dst_ip);
+    data.extend_from_slice(&src_ip);
+
+    // Compute IPv4 header checksum
+    let ip_cksum = ipv4_checksum(&data);
+    data[10] = (ip_cksum >> 8) as u8;
+    data[11] = (ip_cksum & 0xff) as u8;
+    buf.extend_from_slice(&data);
+
     buf.extend_transport_header(rev, payload.len(), hdr.protocol);
     buf.extend_from_slice(payload);
+
+    // Compute UDP checksum
+    let udp_cksum = tcp_checksum(&hdr.src, &hdr.dst, 17, &buf[20..]);
+    buf[20 + 6] = (udp_cksum >> 8) as u8; // UDP checksum at offset 6 within UDP header
+    buf[20 + 7] = (udp_cksum & 0xff) as u8;
+
     Ok(())
 }
 
-fn build_ipv6(
+fn build_udp_ipv6(
     buf: &mut Vec<u8>,
     payload: &[u8],
     hdr: &IpHeader,
     rev: &ConnKey,
-    transport_hdr_len: usize,
 ) -> Result<()> {
     let src_ip_raw = rev.src_ip.to_be_bytes();
     let dst_ip_raw = rev.dst_ip.to_be_bytes();
-    let ipv6_payload_len = (transport_hdr_len + payload.len()) as u16;
+    let ipv6_payload_len = (8 + payload.len()) as u16;
 
     buf.extend_from_slice(&[
         0x60, 0x00, 0x00, 0x00,
@@ -396,6 +507,12 @@ fn build_ipv6(
     buf.extend_from_slice(&dst_ip_raw);
     buf.extend_transport_header(rev, payload.len(), hdr.protocol);
     buf.extend_from_slice(payload);
+
+    // UDP checksum (mandatory for IPv6)
+    let udp_cksum = tcp_checksum(&hdr.src, &hdr.dst, 17, &buf[40..]);
+    buf[40 + 4] = (udp_cksum >> 8) as u8; // UDP checksum at offset 4 within UDP header
+    buf[40 + 5] = (udp_cksum & 0xff) as u8;
+
     Ok(())
 }
 
@@ -429,7 +546,6 @@ fn extend_tcp_response_header(
     flags: u8,
     seq: u32,
     ack: u32,
-    _payload_len: usize,
 ) {
     let sport = rev.sport.to_be_bytes();
     let dport = rev.dport.to_be_bytes();
@@ -991,12 +1107,12 @@ mod tests {
     // ── IPv6 payload length ──
 
     #[test]
-    fn test_ipv6_tcp_response_payload_length() {
+    fn test_ipv6_response_payload_length_100() {
         let original = IpHeader {
             version: 6,
             src: IpAddr::V6("fe80::1".parse().unwrap()),
             dst: IpAddr::V6("2001:db8::1".parse().unwrap()),
-            protocol: 6,
+            protocol: 17,
             header_len: 40,
             src_port: 54321,
             dst_port: 443,
@@ -1007,11 +1123,11 @@ mod tests {
         let rev = ConnKey::from_ip(&original, original.src_port, original.dst_port).reversed();
         let payload = vec![0xab; 100];
 
-        let pkt = build_response_packet(&payload, &original, &rev).expect("build IPv6 TCP");
+        let pkt = build_response_packet(&payload, &original, &rev).expect("build IPv6 UDP");
 
-        // IPv6 payload len = TCP header(20) + payload(100) = 120
+        // IPv6 payload len = UDP header(8) + payload(100) = 108
         let ipv6_payload_len = u16::from_be_bytes([pkt[4], pkt[5]]);
-        assert_eq!(ipv6_payload_len, 120);
+        assert_eq!(ipv6_payload_len, 108);
     }
 
     #[test]
@@ -1039,12 +1155,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ipv4_tcp_response_total_length() {
+    fn test_ipv4_response_total_length_200() {
         let original = IpHeader {
             version: 4,
             src: IpAddr::V4("10.0.0.1".parse().unwrap()),
             dst: IpAddr::V4("1.2.3.4".parse().unwrap()),
-            protocol: 6,
+            protocol: 17,
             header_len: 20,
             src_port: 12345,
             dst_port: 443,
@@ -1055,11 +1171,11 @@ mod tests {
         let rev = ConnKey::from_ip(&original, original.src_port, original.dst_port).reversed();
         let payload = vec![0x42; 200];
 
-        let pkt = build_response_packet(&payload, &original, &rev).expect("build IPv4 TCP");
+        let pkt = build_response_packet(&payload, &original, &rev).expect("build IPv4 UDP");
 
-        // Total IP len = IP(20) + TCP(20) + payload(200) = 240
+        // Total IP len = IP(20) + UDP(8) + payload(200) = 228
         let total_len = u16::from_be_bytes([pkt[2], pkt[3]]);
-        assert_eq!(total_len, 240);
+        assert_eq!(total_len, 228);
     }
 
     #[test]
@@ -1122,7 +1238,7 @@ mod tests {
             version: 4,
             src: IpAddr::V4("10.0.0.1".parse().unwrap()),
             dst: IpAddr::V4("1.2.3.4".parse().unwrap()),
-            protocol: 6,
+            protocol: 17,
             header_len: 20,
             src_port: 1234,
             dst_port: 5678,
