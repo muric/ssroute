@@ -39,7 +39,17 @@ struct IpHeader {
     header_len: u8,
     src_port: u16,
     dst_port: u16,
+    // TCP fields (only valid for protocol == 6)
+    pub tcp_flags: u8,
+    pub tcp_seq: u32,
+    #[allow(dead_code)]
+    tcp_ack: u32,
 }
+
+// TCP flag constants
+const TCP_SYN: u8 = 0x02;
+const TCP_ACK: u8 = 0x10;
+const TCP_PSH: u8 = 0x08;
 
 fn ipv4_addr_from_bytes(bytes: &[u8]) -> Option<Ipv4Addr> {
     if bytes.len() < 4 {
@@ -84,7 +94,8 @@ fn parse_ipv4(buf: &[u8]) -> Option<IpHeader> {
         return None;
     }
 
-    let needed = ihl as usize + if protocol == 6 { 20 } else { 8 };
+    let transport_needed = if protocol == 6 { 20 } else { 8 };
+    let needed = ihl as usize + transport_needed;
     if buf.len() < needed {
         return None;
     }
@@ -92,13 +103,23 @@ fn parse_ipv4(buf: &[u8]) -> Option<IpHeader> {
     let src = IpAddr::V4(ipv4_addr_from_bytes(&buf[12..16])?);
     let dst = IpAddr::V4(ipv4_addr_from_bytes(&buf[16..20])?);
 
-    let transport_start = ihl as usize;
-    let sport = u16::from_be_bytes(buf[transport_start..transport_start + 2].try_into().ok()?);
+    let th = ihl as usize;
+    let sport = u16::from_be_bytes(buf[th..th + 2].try_into().ok()?);
     let dport = u16::from_be_bytes(
-        buf[transport_start + 2..transport_start + 4]
+        buf[th + 2..th + 4]
             .try_into()
             .ok()?,
     );
+
+    // TCP header fields (flags, seq, ack) — always present in TCP header
+    let (tcp_flags, tcp_seq, tcp_ack) = if protocol == 6 && buf.len() >= ihl as usize + 20 {
+        let seq = u32::from_be_bytes(buf[th + 4..th + 8].try_into().ok()?);
+        let ack = u32::from_be_bytes(buf[th + 8..th + 12].try_into().ok()?);
+        let flags = buf[th + 13];
+        (flags, seq, ack)
+    } else {
+        (0, 0, 0)
+    };
 
     Some(IpHeader {
         version: 4,
@@ -108,6 +129,9 @@ fn parse_ipv4(buf: &[u8]) -> Option<IpHeader> {
         header_len: ihl,
         src_port: sport,
         dst_port: dport,
+        tcp_flags,
+        tcp_seq,
+        tcp_ack,
     })
 }
 
@@ -126,8 +150,19 @@ fn parse_ipv6(buf: &[u8]) -> Option<IpHeader> {
     let src = IpAddr::V6(ipv6_addr_from_bytes(&buf[8..24])?);
     let dst = IpAddr::V6(ipv6_addr_from_bytes(&buf[24..40])?);
 
-    let sport = u16::from_be_bytes(buf[40..42].try_into().ok()?);
-    let dport = u16::from_be_bytes(buf[42..44].try_into().ok()?);
+    let th = 40;
+    let sport = u16::from_be_bytes(buf[th..th + 2].try_into().ok()?);
+    let dport = u16::from_be_bytes(buf[th + 2..th + 4].try_into().ok()?);
+
+    // TCP header fields (flags, seq, ack)
+    let (tcp_flags, tcp_seq, tcp_ack) = if protocol == 6 && buf.len() >= 40 + 20 {
+        let seq = u32::from_be_bytes(buf[th + 4..th + 8].try_into().ok()?);
+        let ack = u32::from_be_bytes(buf[th + 8..th + 12].try_into().ok()?);
+        let flags = buf[th + 13];
+        (flags, seq, ack)
+    } else {
+        (0, 0, 0)
+    };
 
     Some(IpHeader {
         version: 6,
@@ -137,6 +172,9 @@ fn parse_ipv6(buf: &[u8]) -> Option<IpHeader> {
         header_len: 40,
         src_port: sport,
         dst_port: dport,
+        tcp_flags,
+        tcp_seq,
+        tcp_ack,
     })
 }
 
@@ -186,6 +224,7 @@ fn ip_to_u128(ip: IpAddr) -> u128 {
 struct TcpConn {
     write_half: tokio::io::WriteHalf<ProxyClientStream<SsTcpStream>>,
     last_active: std::time::Instant,
+    client_seq: u32,    // Client's current sequence number (starts at ISN)
 }
 
 /// Metadata for a UDP connection (needed to build response packets).
@@ -197,7 +236,31 @@ struct UdpConnMeta {
 
 // ── IP response packet builder ─────────────────────────────────
 
-/// Build a response IP packet by swapping src/dst addresses and ports.
+/// Build a TCP response IP packet with explicit seq/ack numbers.
+fn build_tcp_response_packet(
+    payload: &[u8],
+    original: &IpHeader,
+    rev_key: &ConnKey,
+    server_seq: u32,
+    client_ack: u32,
+) -> Result<Vec<u8>> {
+    let original_flags = original.tcp_flags;
+    // Response flags: if SYN was set, SYN+ACK; otherwise PSH+ACK
+    let resp_flags = if original_flags & TCP_SYN != 0 {
+        TCP_SYN | TCP_ACK
+    } else {
+        TCP_PSH | TCP_ACK
+    };
+    let transport_hdr_len = 20;
+
+    match original.version {
+        4 => build_tcp_ipv4_packet(payload, original, rev_key, transport_hdr_len, resp_flags, server_seq, client_ack),
+        6 => build_tcp_ipv6_packet(payload, original, rev_key, transport_hdr_len, resp_flags, server_seq, client_ack),
+        v => bail!("unsupported IP version: {v}"),
+    }
+}
+
+/// Build a UDP response IP packet by swapping src/dst addresses and ports.
 fn build_response_packet(
     payload: &[u8],
     original: &IpHeader,
@@ -212,6 +275,70 @@ fn build_response_packet(
         v => bail!("unsupported IP version: {v}"),
     }
     Ok(packet)
+}
+
+fn build_tcp_ipv4_packet(
+    payload: &[u8],
+    hdr: &IpHeader,
+    rev: &ConnKey,
+    transport_hdr_len: usize,
+    tcp_flags: u8,
+    seq: u32,
+    ack: u32,
+) -> Result<Vec<u8>> {
+    let dst_ip = match &hdr.dst {
+        IpAddr::V4(v) => v.octets(),
+        _ => bail!("expected IPv4, got IPv6"),
+    };
+    let src_ip = match &hdr.src {
+        IpAddr::V4(v) => v.octets(),
+        _ => bail!("expected IPv4, got IPv6"),
+    };
+
+    let total_len = (payload.len() + 20 + transport_hdr_len) as u16;
+    let mut pkt = Vec::with_capacity(total_len as usize);
+    pkt.extend_from_slice(&[
+        0x45,                // version=4, IHL=5
+        0x00,                // ToS
+        (total_len >> 8) as u8, (total_len & 0xff) as u8,
+        0x00, 0x00,          // identification
+        0x40, 0x00,          // DF flag
+        64,                  // TTL
+        hdr.protocol,
+        0x00, 0x00,          // checksum (0 = kernel computes)
+    ]);
+    pkt.extend_from_slice(&dst_ip);
+    pkt.extend_from_slice(&src_ip);
+    extend_tcp_response_header(&mut pkt, rev, tcp_flags, seq, ack, payload.len());
+    pkt.extend_from_slice(payload);
+    Ok(pkt)
+}
+
+fn build_tcp_ipv6_packet(
+    payload: &[u8],
+    hdr: &IpHeader,
+    rev: &ConnKey,
+    transport_hdr_len: usize,
+    tcp_flags: u8,
+    seq: u32,
+    ack: u32,
+) -> Result<Vec<u8>> {
+    let src_ip_raw = rev.src_ip.to_be_bytes();
+    let dst_ip_raw = rev.dst_ip.to_be_bytes();
+    let ipv6_payload_len = (transport_hdr_len + payload.len()) as u16;
+
+    let mut pkt = Vec::with_capacity((ipv6_payload_len + 40) as usize);
+    pkt.extend_from_slice(&[
+        0x60, 0x00, 0x00, 0x00,
+        (ipv6_payload_len >> 8) as u8, (ipv6_payload_len & 0xff) as u8,
+        hdr.protocol,
+        64, // hop limit
+    ]);
+    pkt.extend_from_slice(&src_ip_raw);
+    pkt.extend_from_slice(&dst_ip_raw);
+    extend_tcp_response_header(&mut pkt, rev, tcp_flags, seq, ack, payload.len());
+    pkt.extend_from_slice(payload);
+    Ok(pkt)
 }
 
 fn build_ipv4(
@@ -272,7 +399,7 @@ fn build_ipv6(
     Ok(())
 }
 
-/// Write TCP or UDP transport header with swapped ports.
+/// Write UDP transport header with swapped ports.
 trait TransportHeaderExt {
     fn extend_transport_header(&mut self, rev: &ConnKey, payload_len: usize, protocol: u8);
 }
@@ -282,16 +409,6 @@ impl TransportHeaderExt for Vec<u8> {
         let sport = rev.sport.to_be_bytes();
         let dport = rev.dport.to_be_bytes();
         match protocol {
-            6 => { // TCP
-                self.extend_from_slice(&[
-                    sport[0], sport[1], dport[0], dport[1],
-                    0x00, 0x00, 0x00, 0x00, // seq, ack
-                    0x50, 0x00,             // data offset, flags
-                    0xff, 0xff,             // window
-                    0x00, 0x00,             // checksum
-                    0x00, 0x00,             // urgent
-                ]);
-            }
             17 => { // UDP
                 let udp_len = (8 + payload_len) as u16;
                 self.extend_from_slice(&[
@@ -303,6 +420,27 @@ impl TransportHeaderExt for Vec<u8> {
             _ => unreachable!(),
         }
     }
+}
+
+/// Write a TCP header with proper flags, seq/ack numbers and swapped ports.
+fn extend_tcp_response_header(
+    buf: &mut Vec<u8>,
+    rev: &ConnKey,
+    flags: u8,
+    seq: u32,
+    ack: u32,
+    _payload_len: usize,
+) {
+    let sport = rev.sport.to_be_bytes();
+    let dport = rev.dport.to_be_bytes();
+    buf.extend_from_slice(&sport);
+    buf.extend_from_slice(&dport);
+    buf.extend_from_slice(&seq.to_be_bytes());
+    buf.extend_from_slice(&ack.to_be_bytes());
+    buf.extend_from_slice(&[0x50, flags]); // data offset=5 (20 bytes), flags
+    buf.extend_from_slice(&[0xff, 0xff]);   // window
+    buf.extend_from_slice(&[0x00, 0x00]);   // checksum (0 = kernel computes)
+    buf.extend_from_slice(&[0x00, 0x00]);   // urgent
 }
 
 /// Write a packet to the TUN interface via spawn_blocking.
@@ -472,7 +610,9 @@ async fn handle_tcp_packet(
         Some(conn) => {
             conn.last_active = std::time::Instant::now();
 
+            // Update client_seq if this packet has data
             if !payload.is_empty() {
+                conn.client_seq = hdr.tcp_seq + payload.len() as u32;
                 if let Err(e) = conn.write_half.write_all(payload).await {
                     tracing::warn!("TCP stream write failed: {e}, removing connection");
                     tcp_connections.remove(rev_key);
@@ -523,13 +663,20 @@ async fn handle_tcp_packet(
 
                     // Spawn per-connection reader: continuously drain SS stream → TUN
                     let tun_clone = tun_fd.try_clone().ok();
-                    let key = *rev_key;
+                    let client_seq = hdr.tcp_seq;
+                    let server_isn = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as u32;
                     if let Some(tun_fd) = tun_clone {
+                        let key = *rev_key;
                         tokio::spawn(tcp_reader_task(
                             read_half,
                             tun_fd,
                             *hdr,
                             key,
+                            client_seq,
+                            server_isn,
                         ));
                     }
 
@@ -538,6 +685,7 @@ async fn handle_tcp_packet(
                         TcpConn {
                             write_half,
                             last_active: std::time::Instant::now(),
+                            client_seq,
                         },
                     );
                 }
@@ -557,8 +705,10 @@ async fn handle_tcp_packet(
 async fn tcp_reader_task(
     mut stream: tokio::io::ReadHalf<ProxyClientStream<SsTcpStream>>,
     tun_fd: OwnedFd,
-    hdr: IpHeader,
+    orig_hdr: IpHeader, // Original client packet for src/dst
     rev_key: ConnKey,
+    client_seq: u32,    // Client's current seq (for ACK in response)
+    mut server_seq: u32, // Server's current seq (incremented per response)
 ) {
     let mut resp_buf = [0u8; 65536];
     loop {
@@ -570,9 +720,21 @@ async fn tcp_reader_task(
             }
             Ok(n) => {
                 let resp_data = &resp_buf[..n];
-                if let Ok(pkt) = build_response_packet(resp_data, &hdr, &rev_key) {
-                    write_to_tun(&tun_fd, &pkt).await;
-                }
+                let pkt = match build_tcp_response_packet(
+                    resp_data,
+                    &orig_hdr,
+                    &rev_key,
+                    server_seq,
+                    client_seq,
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!("Failed to build response packet: {e}");
+                        return;
+                    }
+                };
+                write_to_tun(&tun_fd, &pkt).await;
+                server_seq += n as u32;
             }
             Err(e) => {
                 tracing::warn!("TCP stream read error for {:?}: {e}", rev_key);
@@ -838,6 +1000,9 @@ mod tests {
             header_len: 40,
             src_port: 54321,
             dst_port: 443,
+            tcp_flags: 0,
+            tcp_seq: 0,
+            tcp_ack: 0,
         };
         let rev = ConnKey::from_ip(&original, original.src_port, original.dst_port).reversed();
         let payload = vec![0xab; 100];
@@ -859,6 +1024,9 @@ mod tests {
             header_len: 40,
             src_port: 50000,
             dst_port: 53,
+            tcp_flags: 0,
+            tcp_seq: 0,
+            tcp_ack: 0,
         };
         let rev = ConnKey::from_ip(&original, original.src_port, original.dst_port).reversed();
         let payload = vec![0xde; 50];
@@ -880,6 +1048,9 @@ mod tests {
             header_len: 20,
             src_port: 12345,
             dst_port: 443,
+            tcp_flags: 0,
+            tcp_seq: 0,
+            tcp_ack: 0,
         };
         let rev = ConnKey::from_ip(&original, original.src_port, original.dst_port).reversed();
         let payload = vec![0x42; 200];
@@ -901,6 +1072,9 @@ mod tests {
             header_len: 20,
             src_port: 50000,
             dst_port: 53,
+            tcp_flags: 0,
+            tcp_seq: 0,
+            tcp_ack: 0,
         };
         let rev = ConnKey::from_ip(&original, original.src_port, original.dst_port).reversed();
         let payload = vec![0x42; 100];
@@ -924,6 +1098,9 @@ mod tests {
             header_len: 20,
             src_port: 1234,
             dst_port: 5678,
+            tcp_flags: 0,
+            tcp_seq: 0,
+            tcp_ack: 0,
         };
         let key = ConnKey::from_ip(&hdr, hdr.src_port, hdr.dst_port);
         let rev = key.reversed();
@@ -949,6 +1126,9 @@ mod tests {
             header_len: 20,
             src_port: 1234,
             dst_port: 5678,
+            tcp_flags: 0,
+            tcp_seq: 0,
+            tcp_ack: 0,
         };
         let rev = ConnKey::from_ip(&original, original.src_port, original.dst_port).reversed();
         let payload = vec![0x01, 0x02];
@@ -973,6 +1153,9 @@ mod tests {
             header_len: 40,
             src_port: 5000,
             dst_port: 53,
+            tcp_flags: 0,
+            tcp_seq: 0,
+            tcp_ack: 0,
         };
         let rev = ConnKey::from_ip(&original, original.src_port, original.dst_port).reversed();
         let payload = vec![0xaa];
