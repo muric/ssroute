@@ -17,105 +17,124 @@ async fn add_route(
 
     match ip {
         IpAddr::V4(dest_ip) => {
-            let mut builder = handle
-                .route()
-                .add()
-                .v4()
-                .destination_prefix(dest_ip, prefix_len)
-                .output_interface(iface_index);
-
-            if let Some(IpAddr::V4(gw_ip)) = gateway {
-                builder = builder.gateway(gw_ip);
-            }
-
-            match builder.execute().await {
-                Ok(()) => Ok(()),
-                Err(e) if is_file_exists(&e) => {
-                    // Route already exists - not an error
-                    tracing::debug!("Route {destination} already exists, skipping");
-                    Ok(())
-                }
-                Err(e) if gateway.is_some() => {
-                    // If adding route with gateway fails, try without gateway (interface-only)
-                    tracing::debug!("Route with gateway failed ({e}), trying without gateway");
-                    match handle
-                        .route()
-                        .add()
-                        .v4()
-                        .destination_prefix(dest_ip, prefix_len)
-                        .output_interface(iface_index)
-                        .execute()
-                        .await
-                    {
-                        Ok(()) => {
-                            tracing::debug!("Successfully added IPv4 route {destination} on interface (no gateway)");
-                            Ok(())
-                        }
-                        Err(e) if is_file_exists(&e) => {
-                            tracing::debug!("Route {destination} already exists (interface-only), skipping");
-                            Ok(())
-                        }
-                        Err(e) => Err(e).with_context(|| format!(
-                            "netlink add_route (fallback): destination={destination}, iface_index={iface_index}"
-                        )),
-                    }
-                }
-                Err(e) => Err(e).with_context(|| {
-                    format!(
-                        "netlink add_route: destination={destination}, gateway={gateway:?}, iface_index={iface_index}"
-                    )
-                }),
-            }
+            add_route_v4(handle, dest_ip, prefix_len, gateway, iface_index, destination).await
         }
         IpAddr::V6(dest_ip) => {
-            let mut builder = handle
-                .route()
-                .add()
-                .v6()
-                .destination_prefix(dest_ip, prefix_len)
-                .output_interface(iface_index);
+            add_route_v6(handle, dest_ip, prefix_len, gateway, iface_index, destination).await
+        }
+    }
+}
 
-            if let Some(IpAddr::V6(gw_ip)) = gateway {
-                builder = builder.gateway(gw_ip);
-            }
-
-            match builder.execute().await {
+/// Execute a route add with "already exists" handling and gateway fallback.
+/// `with_gw` tries the route with gateway, `without_gw` tries without.
+async fn add_route_with_gw<F, G>(
+    with_gw: F,
+    without_gw: G,
+    destination: &str,
+    iface_index: u32,
+) -> Result<()>
+where
+    F: std::future::Future<Output = Result<(), rtnetlink::Error>>,
+    G: std::future::Future<Output = Result<(), rtnetlink::Error>>,
+{
+    match with_gw.await {
+        Ok(()) => Ok(()),
+        Err(e) if is_file_exists(&e) => {
+            tracing::debug!("Route {destination} already exists, skipping");
+            Ok(())
+        }
+        Err(e) => {
+            tracing::debug!("Route with gateway failed ({e}), trying without gateway");
+            match without_gw.await {
                 Ok(()) => Ok(()),
                 Err(e) if is_file_exists(&e) => {
-                    tracing::debug!("Route {destination} already exists, skipping");
+                    tracing::debug!("Route {destination} already exists (interface-only), skipping");
                     Ok(())
                 }
-                Err(e) if gateway.is_some() => {
-                    // If adding route with gateway fails, try without gateway (interface-only)
-                    tracing::debug!("Route with gateway failed ({e}), trying without gateway");
-                    match handle
-                        .route()
-                        .add()
-                        .v6()
-                        .destination_prefix(dest_ip, prefix_len)
-                        .output_interface(iface_index)
-                        .execute()
-                        .await
-                    {
-                        Ok(()) => {
-                            tracing::debug!("Successfully added IPv6 route {destination} on interface (no gateway)");
-                            Ok(())
-                        }
-                        Err(e) if is_file_exists(&e) => {
-                            tracing::debug!("Route {destination} already exists (interface-only), skipping");
-                            Ok(())
-                        }
-                        Err(e) => Err(e).with_context(|| format!(
-                            "netlink add_route (fallback): destination={destination}, iface_index={iface_index}"
-                        )),
-                    }
-                }
                 Err(e) => Err(e).with_context(|| format!(
-                    "netlink add_route: destination={destination}, gateway={gateway:?}, iface_index={iface_index}"
+                    "netlink add_route (fallback): destination={destination}, iface_index={iface_index}"
                 )),
             }
         }
     }
+}
+
+/// Add IPv4 route with gateway fallback to interface-only.
+async fn add_route_v4(
+    handle: &rtnetlink::Handle,
+    dest_ip: std::net::Ipv4Addr,
+    prefix_len: u8,
+    gateway: Option<IpAddr>,
+    iface_index: u32,
+    destination: &str,
+) -> Result<()> {
+    let h = handle;
+    let with_gw = async move {
+        let builder = h
+            .route()
+            .add()
+            .v4()
+            .destination_prefix(dest_ip, prefix_len)
+            .output_interface(iface_index);
+        let builder = if let Some(IpAddr::V4(gw_ip)) = gateway {
+            builder.gateway(gw_ip)
+        } else {
+            builder
+        };
+        builder.execute().await
+    };
+    let h = handle;
+    let without_gw = async move {
+        let builder = h
+            .route()
+            .add()
+            .v4()
+            .destination_prefix(dest_ip, prefix_len)
+            .output_interface(iface_index)
+            .execute()
+            .await;
+        builder
+    };
+    add_route_with_gw(with_gw, without_gw, destination, iface_index).await
+}
+
+/// Add IPv6 route with gateway fallback to interface-only.
+async fn add_route_v6(
+    handle: &rtnetlink::Handle,
+    dest_ip: std::net::Ipv6Addr,
+    prefix_len: u8,
+    gateway: Option<IpAddr>,
+    iface_index: u32,
+    destination: &str,
+) -> Result<()> {
+    let h = handle;
+    let with_gw = async move {
+        let builder = h
+            .route()
+            .add()
+            .v6()
+            .destination_prefix(dest_ip, prefix_len)
+            .output_interface(iface_index);
+        let builder = if let Some(IpAddr::V6(gw_ip)) = gateway {
+            builder.gateway(gw_ip)
+        } else {
+            builder
+        };
+        builder.execute().await
+    };
+    let h = handle;
+    let without_gw = async move {
+        let builder = h
+            .route()
+            .add()
+            .v6()
+            .destination_prefix(dest_ip, prefix_len)
+            .output_interface(iface_index)
+            .execute()
+            .await;
+        builder
+    };
+    add_route_with_gw(with_gw, without_gw, destination, iface_index).await
 }
 
 /// Check if error is "file already exists" (os error 17 / EEXIST).
@@ -297,14 +316,9 @@ pub async fn add_routes_from_dir(
 
                 let route_gw: Option<IpAddr> = if is_ipv4 {
                     gw_ref.filter(|g| g.is_ipv4())
-                } else if iface_name.starts_with("tun") {
-                    tracing::debug!(
-                        "TUN interface detected, using interface-only IPv6 route for {dest}"
-                    );
-                    None
                 } else {
-                    // gw6 must be IPv6 — don't fall back to gw if it isn't
-                    gw6_ref.filter(|g| g.is_ipv6()).or_else(|| gw_ref.filter(|g| g.is_ipv6()))
+                    // IPv6: prefer gateway6, fall back to gateway if it's IPv6
+                    gw6_ref.filter(|g| g.is_ipv6())
                 };
 
                 if let Err(e) = add_route(handle_ref, &dest, route_gw, iface_index).await {

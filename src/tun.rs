@@ -3,9 +3,9 @@ use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 
 use anyhow::{bail, Context, Result};
 
+use crate::netlink;
+
 // Linux x86_64 ioctl constants for TUN devices.
-// Used only in oneshot mode (persistent TUN). In daemon mode, shadowsocks-service
-// creates the TUN device itself.
 const TUNSETIFF: u64 = 0x400454ca;
 const IFF_TUN: u16 = 0x0001;
 const IFF_NO_PI: u16 = 0x1000;
@@ -57,26 +57,46 @@ pub fn create_tun(name: &str, persistent: bool) -> Result<Option<OwnedFd>> {
             bail!("ioctl TUNSETPERSIST for {name}: {err}");
         }
         tracing::info!("Interface {name} is now persistent");
-        // fd is closed when `file` is dropped
         return Ok(None);
     }
 
     tracing::info!("Interface {name} created (non-persistent, fd kept open)");
 
-    // Prevent the File from closing the fd — we transfer ownership to OwnedFd
     let raw_fd = file.as_raw_fd();
     std::mem::forget(file);
     let owned = unsafe { OwnedFd::from_raw_fd(raw_fd) };
     Ok(Some(owned))
 }
 
-/// Configure TUN interface: assign IP addresses (gateway/24 and gateway6/64), set MTU, bring up.
+/// Configure TUN interface: assign IP addresses, set MTU, bring up.
 pub async fn configure_tun(name: &str, gateway: &str, gateway6: &str, mtu: u16) -> Result<()> {
-    let (connection, handle, _) =
-        rtnetlink::new_connection().context("create netlink connection")?;
-    let _conn = tokio::spawn(connection);
+    netlink::with_handle(|handle| {
+        let name = name.to_string();
+        let gateway = gateway.to_string();
+        let gateway6 = gateway6.to_string();
+        async move { configure_inner(&handle, &name, &gateway, &gateway6, mtu).await }
+    })
+    .await
+}
 
-    // Find link by name
+async fn configure_inner(
+    handle: &rtnetlink::Handle,
+    name: &str,
+    gateway: &str,
+    gateway6: &str,
+    mtu: u16,
+) -> Result<()> {
+    let index = get_link_index(handle, name).await?;
+
+    add_ipv4_addr(handle, index, gateway, name).await?;
+    add_ipv6_addr(handle, index, gateway6, name).await?;
+    set_mtu(handle, index, mtu).await?;
+    bring_up(handle, index).await?;
+
+    Ok(())
+}
+
+async fn get_link_index(handle: &rtnetlink::Handle, name: &str) -> Result<u32> {
     use futures::TryStreamExt;
     let mut links = handle.link().get().match_name(name.to_string()).execute();
     let link = links
@@ -84,73 +104,80 @@ pub async fn configure_tun(name: &str, gateway: &str, gateway6: &str, mtu: u16) 
         .await
         .context("netlink get link")?
         .with_context(|| format!("interface not found: {name}"))?;
-    let index = link.header.index;
+    Ok(link.header.index)
+}
 
-    // Add IPv4 address if gateway is set
-    if !gateway.is_empty() {
-        let addr: std::net::IpAddr = gateway
-            .parse()
-            .with_context(|| format!("invalid gateway IP: {gateway}"))?;
-        if !addr.is_ipv4() {
-            bail!("gateway must be IPv4 address: {gateway}");
-        }
-        let result = handle.address().add(index, addr, 24).execute().await;
+async fn add_ipv4_addr(handle: &rtnetlink::Handle, index: u32, gateway: &str, name: &str) -> Result<()> {
+    if gateway.is_empty() {
+        return Ok(());
+    }
+    let addr: std::net::IpAddr = gateway
+        .parse()
+        .with_context(|| format!("invalid gateway IP: {gateway}"))?;
+    if !addr.is_ipv4() {
+        bail!("gateway must be IPv4 address: {gateway}");
+    }
 
-        match result {
-            Ok(()) => {}
-            Err(e) => {
-                let err_str = format!("{e}");
-                if err_str.contains("File exists") || err_str.contains("EEXIST") {
-                    tracing::warn!("IPv4 {gateway} already set on interface {name}");
-                } else {
-                    return Err(e).context("add IPv4 address to interface");
-                }
+    match handle.address().add(index, addr, 24).execute().await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let err_str = format!("{e}");
+            if err_str.contains("File exists") || err_str.contains("EEXIST") {
+                tracing::warn!("IPv4 {gateway} already set on interface {name}");
+                Ok(())
+            } else {
+                Err(e).context(format!("add IPv4 address to interface {name}"))
             }
         }
     }
+}
 
-    // Add IPv6 address if gateway6 is set
-    if !gateway6.is_empty() {
-        let addr: std::net::IpAddr = gateway6
-            .parse()
-            .with_context(|| format!("invalid gateway6 IP: {gateway6}"))?;
-        if !addr.is_ipv6() {
-            bail!("gateway6 must be IPv6 address: {gateway6}");
-        }
-        let result = handle.address().add(index, addr, 64).execute().await;
+async fn add_ipv6_addr(handle: &rtnetlink::Handle, index: u32, gateway6: &str, name: &str) -> Result<()> {
+    if gateway6.is_empty() {
+        return Ok(());
+    }
+    let addr: std::net::IpAddr = gateway6
+        .parse()
+        .with_context(|| format!("invalid gateway6 IP: {gateway6}"))?;
+    if !addr.is_ipv6() {
+        bail!("gateway6 must be IPv6 address: {gateway6}");
+    }
 
-        match result {
-            Ok(()) => {}
-            Err(e) => {
-                let err_str = format!("{e}");
-                if err_str.contains("File exists") || err_str.contains("EEXIST") {
-                    tracing::warn!("IPv6 {gateway6} already set on interface {name}");
-                } else {
-                    return Err(e).context("add IPv6 address to interface");
-                }
+    match handle.address().add(index, addr, 64).execute().await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let err_str = format!("{e}");
+            if err_str.contains("File exists") || err_str.contains("EEXIST") {
+                tracing::warn!("IPv6 {gateway6} already set on interface {name}");
+                Ok(())
+            } else {
+                Err(e).context(format!("add IPv6 address to interface {name}"))
             }
         }
     }
+}
 
-    // Set MTU
-    if mtu > 0 {
-        handle
-            .link()
-            .set(index)
-            .mtu(mtu as u32)
-            .execute()
-            .await
-            .with_context(|| format!("set MTU {mtu} on interface {name}"))?;
+async fn set_mtu(handle: &rtnetlink::Handle, index: u32, mtu: u16) -> Result<()> {
+    if mtu == 0 {
+        return Ok(());
     }
+    handle
+        .link()
+        .set(index)
+        .mtu(mtu as u32)
+        .execute()
+        .await
+        .with_context(|| format!("set MTU {mtu} on interface"))?;
+    Ok(())
+}
 
-    // Bring interface up
+async fn bring_up(handle: &rtnetlink::Handle, index: u32) -> Result<()> {
     handle
         .link()
         .set(index)
         .up()
         .execute()
         .await
-        .with_context(|| format!("bring up interface {name}"))?;
-
+        .with_context(|| "bring up interface")?;
     Ok(())
 }

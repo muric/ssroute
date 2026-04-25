@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-shadowsocks-service = { version = "1.24", features = ["local", "local-tun", "aead-cipher-2022"] }
+shadowsocks = { version = "1.24" }
 nix = { version = "0.29", features = ["ioctl", "net", "poll", "signal", "fs"] }
 rtnetlink = "0.14"
 netlink-packet-route = "0.19"
@@ -17,6 +17,8 @@ anyhow = "1"
 ipnet = "2"
 futures = "0.3"
 futures-util = "0.3"
+fastrand = "2"
+libc = "0.2"
 zbus = "4.0"
 
 [dev-dependencies]
