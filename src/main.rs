@@ -15,9 +15,10 @@ use zbus::{Connection, Proxy};
 
 use anyhow::{bail, Context, Result};
 use config::ObfsMode;
-use shadowsocks::config::{ServerConfig, ServerType};
+use shadowsocks::config::{Mode, ServerConfig, ServerType};
 use shadowsocks::context::Context as SsContext;
 use shadowsocks::crypto::CipherKind;
+use shadowsocks::plugin::PluginConfig;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_CONFIG_PATHS: &[&str] = &["ssroute.conf", "/etc/ssroute/ssroute.conf"];
@@ -54,11 +55,6 @@ async fn main() -> Result<()> {
 
     // Find config file
     let config_path = find_config(&config_path)?;
-    let config_dir = config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
-
     tracing::info!("Using config: {}", config_path.display());
 
     // Read config
@@ -66,9 +62,9 @@ async fn main() -> Result<()> {
 
     // Dispatch
     if !config.ss_enabled {
-        run_oneshot_mode(&config, &config_dir).await?;
+        run_oneshot_mode(&config).await?;
     } else {
-        run_daemon_mode(&config, &config_dir).await?;
+        run_daemon_mode(&config).await?;
     }
 
     Ok(())
@@ -113,7 +109,7 @@ fn find_config(explicit: &Option<PathBuf>) -> Result<PathBuf> {
 }
 
 /// Oneshot mode: create persistent TUN, add routes, exit.
-async fn run_oneshot_mode(config: &config::Config, config_dir: &Path) -> Result<()> {
+async fn run_oneshot_mode(config: &config::Config) -> Result<()> {
     ensure_networkd_config(&config.interface);
 
     tracing::info!("Creating persistent TUN interface");
@@ -128,16 +124,19 @@ async fn run_oneshot_mode(config: &config::Config, config_dir: &Path) -> Result<
     )
     .await?;
 
-    add_routes(config, config_dir).await;
+    add_routes(config).await;
 
     Ok(())
 }
 
 /// Build a shadowsocks ServerConfig from our app config.
-/// If obfuscation is enabled, starts the plugin and sets plugin_addr.
+/// If obfuscation is enabled, starts the plugin and configures it on ServerConfig
+/// so that ProxyClientStream connects to the plugin address instead of the remote server.
 fn build_ss_config(
     config: &config::Config,
-    plugin_local_addr: Option<std::net::SocketAddr>,
+    plugin_addr: Option<std::net::SocketAddr>,
+    plugin_name: Option<&str>,
+    plugin_opts: Option<&str>,
 ) -> Result<ServerConfig> {
     let cipher: CipherKind = config
         .ss_method
@@ -153,8 +152,19 @@ fn build_ss_config(
         .map_err(|e| anyhow::anyhow!("invalid SS config: {e:?}"))?;
 
     // Configure plugin if needed
-    if let Some(plugin_addr) = plugin_local_addr {
-        svr_cfg.set_plugin_addr(plugin_addr.into());
+    // set_plugin_addr() alone is NOT enough — tcp_external_addr() checks self.plugin() first.
+    // If plugin() returns None, tcp_external_addr() returns &self.addr (remote server).
+    // Setting PluginConfig enables plugin mode, so tcp_external_addr() returns plugin_addr.
+    if let Some(addr) = plugin_addr {
+        if let (Some(pname), Some(popts)) = (plugin_name, plugin_opts) {
+            svr_cfg.set_plugin(PluginConfig {
+                plugin: pname.to_string(),
+                plugin_opts: Some(popts.to_string()),
+                plugin_args: Vec::new(),
+                plugin_mode: Mode::TcpAndUdp,
+            });
+        }
+        svr_cfg.set_plugin_addr(addr.into());
     }
 
     Ok(svr_cfg)
@@ -167,10 +177,15 @@ fn build_ss_context() -> shadowsocks::context::SharedContext {
 }
 
 /// Daemon mode: start TUN-to-SS proxy, add routes, run forever.
-async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<()> {
+async fn run_daemon_mode(config: &config::Config) -> Result<()> {
     if config.ss_server.is_empty() || config.ss_server_port == 0 || config.ss_password.is_empty() {
         bail!("Shadowsocks is enabled but ss_server, ss_server_port, or ss_password is not set");
     }
+
+    // Setup policy routing to prevent TUN routing loop.
+    // When proxy writes response packets to TUN, the kernel routes them back to TUN.
+    // We use fwmark to route marked packets via main table for local delivery.
+    setup_policy_routing().await?;
 
     let config = config.clone();
     let mut plugin_process: Option<plugin::PluginProcess> = None;
@@ -206,7 +221,25 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
     }
 
     // Build shadowsocks config and context
-    let svr_cfg = build_ss_config(&config, plugin_local_addr)?;
+    let plugin_name = if config.obfs_mode == ObfsMode::Xray {
+        if !config.ss_plugin.is_empty() {
+            Some(config.ss_plugin.as_str())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let plugin_opts = if config.obfs_mode == ObfsMode::Xray {
+        if !config.ss_plugin_opts.is_empty() {
+            Some(config.ss_plugin_opts.as_str())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let svr_cfg = build_ss_config(&config, plugin_local_addr, plugin_name, plugin_opts)?;
     let ctx = build_ss_context();
 
     // Create TUN interface (non-persistent — we keep the fd open)
@@ -252,7 +285,7 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
     }
 
     // Add routes
-    add_routes(&config, config_dir).await;
+    add_routes(&config).await;
 
     // Start the TUN-to-SS proxy (blocks until SIGINT/SIGTERM)
     tracing::info!("Starting TUN-to-shadowsocks proxy");
@@ -305,10 +338,10 @@ async fn run_daemon_mode(config: &config::Config, config_dir: &Path) -> Result<(
     result
 }
 
-/// Add routes from data/ and default_route/ relative to config_dir.
-async fn add_routes(config: &config::Config, config_dir: &Path) {
+/// Add routes from configured route directories.
+async fn add_routes(config: &config::Config) {
     if !config.interface.is_empty() && (!config.gateway.is_empty() || !config.gateway6.is_empty()) {
-        let dir = config_dir.join("data");
+        let dir = Path::new(&config.route_dir);
         tracing::info!(
             "Adding routes for interface: {} from {}",
             config.interface,
@@ -328,7 +361,7 @@ async fn add_routes(config: &config::Config, config_dir: &Path) {
     }
 
     if !config.default_interface.is_empty() && !config.default_gateway.is_empty() {
-        let dir = config_dir.join("default_route");
+        let dir = Path::new(&config.default_route_dir);
         tracing::info!(
             "Adding routes for default interface: {} from {}",
             config.default_interface,
@@ -499,4 +532,34 @@ async fn is_nm_running(conn: &Connection) -> bool {
         .call::<&str, (&str,), bool>("NameHasOwner", &("org.freedesktop.NetworkManager",))
         .await
         .unwrap_or(false)
+}
+
+/// Setup policy routing to prevent TUN routing loop.
+///
+/// When proxy writes response packets to TUN, the kernel routes them back to TUN
+/// based on the routing table. This creates a loop where packets never reach the client.
+///
+/// Fix: set fwmark on the proxy socket via SO_MARK (no iptables needed),
+/// then add an ip rule to route marked packets via a custom table for local delivery.
+async fn setup_policy_routing() -> Result<()> {
+    // Use fwmark 0x42 for proxy traffic
+    const MARK: u32 = 0x42;
+
+    // 1. Add ip rule: if fwmark == MARK, use table 100
+    tracing::info!("Adding ip rule for fwmark {MARK}");
+    let _ = tokio::process::Command::new("ip")
+        .args(["rule", "add", "fwmark", &MARK.to_string(), "table", "100"])
+        .output()
+        .await;
+
+    // 2. Add route in table 100: route tun2 subnet locally
+    tracing::info!("Adding route in table 100 for local delivery");
+    let _ = tokio::process::Command::new("ip")
+        .args(["route", "add", "10.0.0.0/24", "dev", "lo", "table", "100"])
+        .output()
+        .await;
+
+    tracing::info!("Policy routing setup complete (fwmark={MARK})");
+    tracing::info!("SO_MARK will be set on proxy sockets at connection time");
+    Ok(())
 }

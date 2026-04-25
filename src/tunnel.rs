@@ -4,9 +4,7 @@
 //! and forwards them through encrypted shadowsocks streams.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::os::fd::FromRawFd;
 use std::os::unix::io::{AsRawFd, OwnedFd};
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,6 +18,7 @@ use shadowsocks::relay::tcprelay::proxy_stream::ProxyClientStream;
 use shadowsocks::relay::udprelay::proxy_socket::ProxySocket;
 
 use tokio::io::{split, AsyncReadExt, AsyncWriteExt};
+use tokio::io::unix::{AsyncFd, AsyncFdReadyGuard};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -205,8 +204,12 @@ fn parse_ipv4(buf: &[u8]) -> Option<IpHeader> {
 
 fn parse_ipv6(buf: &[u8]) -> Option<IpHeader> {
     // IPv6 base header is always 40 bytes, no IHL field
+    if buf.len() < 40 {
+        return None;
+    }
     let protocol = buf[4]; // Next header field at offset 4
     if protocol != 6 && protocol != 17 {
+        tracing::debug!("parse_ipv6: next header={}, buf={} bytes, first 8 bytes: {:02x?}", protocol, buf.len(), &buf[..8.min(buf.len())]);
         return None;
     }
 
@@ -292,7 +295,7 @@ fn ip_to_u128(ip: IpAddr) -> u128 {
 struct TcpConn {
     write_half: tokio::io::WriteHalf<ProxyClientStream<SsTcpStream>>,
     last_active: std::time::Instant,
-    client_seq: u32,    // Client's current sequence number (starts at ISN)
+    client_seq: u32,
 }
 
 /// Metadata for a UDP connection (needed to build response packets).
@@ -319,11 +322,10 @@ fn build_tcp_response_packet(
     } else {
         TCP_PSH | TCP_ACK
     };
-    let transport_hdr_len = 20;
 
     match original.version {
-        4 => build_tcp_ipv4_packet(payload, original, rev_key, transport_hdr_len, resp_flags, server_seq, client_ack),
-        6 => build_tcp_ipv6_packet(payload, original, rev_key, transport_hdr_len, resp_flags, server_seq, client_ack),
+        4 => build_tcp_ipv4_packet(payload, original, rev_key, resp_flags, server_seq, client_ack),
+        6 => build_tcp_ipv6_packet(payload, original, rev_key, resp_flags, server_seq, client_ack),
         v => bail!("unsupported IP version: {v}"),
     }
 }
@@ -360,21 +362,21 @@ fn build_tcp_ipv4_packet(
     payload: &[u8],
     hdr: &IpHeader,
     rev: &ConnKey,
-    transport_hdr_len: usize,
     tcp_flags: u8,
     seq: u32,
     ack: u32,
 ) -> Result<Vec<u8>> {
-    let dst_ip = match &hdr.dst {
+    let src_ip = match &hdr.dst {
         IpAddr::V4(v) => v.octets(),
         _ => bail!("expected IPv4, got IPv6"),
     };
-    let src_ip = match &hdr.src {
+    let dst_ip = match &hdr.src {
         IpAddr::V4(v) => v.octets(),
         _ => bail!("expected IPv4, got IPv6"),
     };
 
-    let total_len = (payload.len() + 20 + transport_hdr_len) as u16;
+    // payload = TCP header (20 bytes) + TCP data, total = IP(20) + payload
+    let total_len = (payload.len() + 20) as u16;
 
     // Build IP header with checksum field = 0
     let mut pkt = Vec::with_capacity(total_len as usize);
@@ -382,19 +384,23 @@ fn build_tcp_ipv4_packet(
         0x45,                // version=4, IHL=5
         0x00,                // ToS
         (total_len >> 8) as u8, (total_len & 0xff) as u8,
-        0x00, 0x00,          // identification
+        0x00, 0x00,          // identification (marked as proxy response)
         0x40, 0x00,          // DF flag
         64,                  // TTL
         hdr.protocol,
         0x00, 0x00,          // checksum placeholder
     ]);
-    pkt.extend_from_slice(&dst_ip);
     pkt.extend_from_slice(&src_ip);
+    pkt.extend_from_slice(&dst_ip);
 
     // Compute IPv4 header checksum (over first 20 bytes with checksum=0)
     let ip_checksum = ipv4_checksum(&pkt);
     pkt[10] = (ip_checksum >> 8) as u8;
     pkt[11] = (ip_checksum & 0xff) as u8;
+
+    // Mark as proxy response (IP identification = 0xBEEF at bytes 4-5)
+    pkt[4] = 0xBE;
+    pkt[5] = 0xEF;
 
     // Build TCP header placeholder (checksum = 0) then payload
     extend_tcp_response_header(&mut pkt, rev, tcp_flags, seq, ack);
@@ -412,14 +418,14 @@ fn build_tcp_ipv6_packet(
     payload: &[u8],
     hdr: &IpHeader,
     rev: &ConnKey,
-    transport_hdr_len: usize,
     tcp_flags: u8,
     seq: u32,
     ack: u32,
 ) -> Result<Vec<u8>> {
     let src_ip_raw = rev.src_ip.to_be_bytes();
     let dst_ip_raw = rev.dst_ip.to_be_bytes();
-    let ipv6_payload_len = (transport_hdr_len + payload.len()) as u16;
+    // payload = TCP header (20 bytes) + TCP data, ipv6 payload = full payload
+    let ipv6_payload_len = payload.len() as u16;
 
     let mut pkt = Vec::with_capacity((ipv6_payload_len + 40) as usize);
     pkt.extend_from_slice(&[
@@ -447,11 +453,11 @@ fn build_udp_ipv4(
     hdr: &IpHeader,
     rev: &ConnKey,
 ) -> Result<()> {
-    let dst_ip = match &hdr.dst {
+    let src_ip = match &hdr.dst {
         IpAddr::V4(v) => v.octets(),
         _ => bail!("expected IPv4, got IPv6"),
     };
-    let src_ip = match &hdr.src {
+    let dst_ip = match &hdr.src {
         IpAddr::V4(v) => v.octets(),
         _ => bail!("expected IPv4, got IPv6"),
     };
@@ -467,13 +473,16 @@ fn build_udp_ipv4(
         hdr.protocol,
         0x00, 0x00,          // checksum placeholder
     ];
-    data.extend_from_slice(&dst_ip);
     data.extend_from_slice(&src_ip);
+    data.extend_from_slice(&dst_ip);
 
     // Compute IPv4 header checksum
     let ip_cksum = ipv4_checksum(&data);
     data[10] = (ip_cksum >> 8) as u8;
     data[11] = (ip_cksum & 0xff) as u8;
+    // Mark as proxy response (IP identification = 0xBEEF at bytes 4-5)
+    data[4] = 0xBE;
+    data[5] = 0xEF;
     buf.extend_from_slice(&data);
 
     buf.extend_transport_header(rev, payload.len(), hdr.protocol);
@@ -559,29 +568,122 @@ fn extend_tcp_response_header(
     buf.extend_from_slice(&[0x00, 0x00]);   // urgent
 }
 
-/// Write a packet to the TUN interface via spawn_blocking.
-/// Unlike the old approach (File::open per packet), this reuses the existing fd
-/// via try_clone + spawn_blocking — no syscall to open /dev/net/tun each time.
-async fn write_to_tun(tun_fd: &OwnedFd, packet: &[u8]) {
+/// Build a TCP SYN-ACK response packet for the client.
+/// This is sent by the app to complete the client-side TCP handshake.
+fn build_synack_packet(hdr: &IpHeader, rev_key: &ConnKey, server_isn: u32, client_isn: u32) -> Result<Vec<u8>> {
+    match hdr.version {
+        4 => build_synack_ipv4(hdr, rev_key, server_isn, client_isn),
+        6 => build_synack_ipv6(hdr, rev_key, server_isn, client_isn),
+        v => bail!("unsupported IP version: {v}"),
+    }
+}
+
+fn build_synack_ipv4(hdr: &IpHeader, rev: &ConnKey, server_isn: u32, client_isn: u32) -> Result<Vec<u8>> {
+    let src_ip = match &hdr.dst {
+        IpAddr::V4(v) => v.octets(),
+        _ => bail!("expected IPv4, got IPv6"),
+    };
+    let dst_ip = match &hdr.src {
+        IpAddr::V4(v) => v.octets(),
+        _ => bail!("expected IPv4, got IPv6"),
+    };
+
+    let mut pkt = Vec::with_capacity(40);
+    pkt.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x28, // version/IHL, ToS, total length (will fix)
+        0x00, 0x00, 0x40, 0x00, // identification, flags
+        64, hdr.protocol,       // TTL, protocol
+        0x00, 0x00,             // checksum placeholder
+    ]);
+    pkt.extend_from_slice(&src_ip);
+    pkt.extend_from_slice(&dst_ip);
+
+    let ip_checksum = ipv4_checksum(&pkt);
+    pkt[10] = (ip_checksum >> 8) as u8;
+    pkt[11] = (ip_checksum & 0xff) as u8;
+
+    // Mark as proxy response (IP identification = 0xBEEF at bytes 4-5)
+    pkt[4] = 0xBE;
+    pkt[5] = 0xEF;
+
+    extend_tcp_response_header(&mut pkt, rev, TCP_SYN | TCP_ACK, server_isn, client_isn as u32 + 1);
+
+    // Fix total length (20 IP + 20 TCP = 40)
+    pkt[2] = 0x00;
+    pkt[3] = 0x28;
+
+    let tcp_cksum = tcp_checksum(&hdr.src, &hdr.dst, hdr.protocol, &pkt[20..]);
+    pkt[36] = (tcp_cksum >> 8) as u8;
+    pkt[37] = (tcp_cksum & 0xff) as u8;
+
+    Ok(pkt)
+}
+
+fn build_synack_ipv6(hdr: &IpHeader, rev: &ConnKey, server_isn: u32, client_isn: u32) -> Result<Vec<u8>> {
+    let src_ip_raw = rev.src_ip.to_be_bytes();
+    let dst_ip_raw = rev.dst_ip.to_be_bytes();
+
+    let mut pkt = Vec::with_capacity(60);
+    pkt.extend_from_slice(&[
+        0x60, 0x00, 0x00, 0x00, 0x00, 0x2c, // version, tc, fl, payload len
+        hdr.protocol, 64,                    // next header, hop limit
+    ]);
+    pkt.extend_from_slice(&src_ip_raw);
+    pkt.extend_from_slice(&dst_ip_raw);
+    extend_tcp_response_header(&mut pkt, rev, TCP_SYN | TCP_ACK, server_isn, client_isn as u32 + 1);
+
+    let tcp_cksum = tcp_checksum(&hdr.src, &hdr.dst, hdr.protocol, &pkt[40..]);
+    pkt[56] = (tcp_cksum >> 8) as u8;
+    pkt[57] = (tcp_cksum & 0xff) as u8;
+
+    Ok(pkt)
+}
+
+/// Write a packet to the TUN interface (via AsyncFd, for main loop use). Retries on EAGAIN.
+async fn write_to_tun(tun: &AsyncFd<OwnedFd>, packet: &[u8]) {
     if packet.is_empty() {
         return;
     }
-    let owned = match tun_fd.try_clone() {
-        Ok(fd) => fd,
-        Err(e) => {
-            tracing::warn!("Failed to clone TUN fd: {e}");
+    loop {
+        let ret = unsafe {
+            libc::write(tun.get_ref().as_raw_fd(), packet.as_ptr() as *const libc::c_void, packet.len())
+        };
+        if ret > 0 {
             return;
         }
-    };
-    let pkt = packet.to_vec(); // Copy so spawn_blocking owns the data
-    if let Err(e) = tokio::task::spawn_blocking(move || {
-        let mut file = unsafe { std::fs::File::from_raw_fd(owned.as_raw_fd()) };
-        std::mem::forget(owned);
-        file.write_all(&pkt)
-    })
-    .await
-    {
-        tracing::warn!("TUN write task panicked: {e}");
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::WouldBlock {
+                tokio::time::sleep(Duration::from_micros(100)).await;
+                continue; // EAGAIN — retry
+            }
+            tracing::debug!("TUN write error: {}", err);
+            return;
+        }
+    }
+}
+
+/// Write a packet to a raw TUN fd (for background tasks without AsyncFd). Retries on EAGAIN.
+async fn write_to_tun_raw(tun_fd: &OwnedFd, packet: &[u8]) {
+    if packet.is_empty() {
+        return;
+    }
+    loop {
+        let ret = unsafe {
+            libc::write(tun_fd.as_raw_fd(), packet.as_ptr() as *const libc::c_void, packet.len())
+        };
+        if ret > 0 {
+            return;
+        }
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::WouldBlock {
+                tokio::time::sleep(Duration::from_micros(100)).await;
+                continue;
+            }
+            tracing::debug!("TUN write error: {}", err);
+            return;
+        }
     }
 }
 
@@ -606,8 +708,11 @@ pub async fn run_tun_tproxy(
     ctx: SharedContext,
     svr_cfg: ServerConfig,
 ) -> Result<()> {
-    // Clone the fd once for write_to_tun (pass to async tasks).
-    let tun_fd_for_writer = tun_fd.try_clone()?;
+    #[allow(unreachable_code)]
+    // Wrap in AsyncFd for proper non-blocking async I/O.
+    let tun = AsyncFd::new(tun_fd)?;
+    // Clone for use by background tasks.
+    let tun_clone = tun.get_ref().try_clone()?;
 
     // TCP connections: reversed key → TCP state
     let mut tcp_connections: HashMap<ConnKey, TcpConn> = HashMap::new();
@@ -641,44 +746,83 @@ pub async fn run_tun_tproxy(
     };
     let udp_socket = Arc::new(udp_socket);
 
-    // Channel for UDP responses from the reader task
-    let (_resp_tx, mut resp_rx) = mpsc::channel::<(Vec<u8>, IpHeader, ConnKey)>(256);
+    // Channel for TCP/UDP responses from reader tasks
+    let (resp_tx, mut resp_rx) = mpsc::channel::<(Vec<u8>, IpHeader, ConnKey)>(256);
 
     // Spawn UDP response reader task
     let _udp_reader = {
         let us = udp_socket.clone();
         let udp_conns = udp_connections.clone();
-        let tun_clone = tun_fd_for_writer.try_clone()?;
+        let tun_fd = tun_clone;
         tokio::spawn(async move {
-            udp_response_reader(us, udp_conns, tun_clone).await
+            udp_response_reader(us, udp_conns, tun_fd).await
         })
     };
 
     let mut read_buf = [0u8; 65536];
 
     loop {
-        let owned = tun_fd.try_clone()?;
-        let n = tokio::task::spawn_blocking(move || {
-            let mut file = unsafe { std::fs::File::from_raw_fd(owned.as_raw_fd()) };
-            std::mem::forget(owned);
-            file.read(&mut read_buf)
-        })
-        .await
-        .unwrap_or(Ok(0))?;
+        // Wait for the fd to become readable using epoll.
+        let mut guard: AsyncFdReadyGuard<'_, OwnedFd> = tun.readable().await?;
+        let result = guard.try_io(|inner: &AsyncFd<OwnedFd>| {
+            let fd = inner.get_ref();
+            let raw_fd = fd.as_raw_fd();
+            let n = unsafe {
+                libc::read(raw_fd, read_buf.as_mut_ptr() as *mut libc::c_void, read_buf.len())
+            };
+            Ok(n)
+        });
 
-        // Drain UDP response channel before processing TUN packets
-        while let Ok((payload, hdr, rev_key)) = resp_rx.try_recv() {
-            if let Ok(pkt) = build_response_packet(&payload, &hdr, &rev_key) {
-                write_to_tun(&tun_fd, &pkt).await;
+        let n = match result {
+            Ok(Ok(n)) => {
+                if n == 0 {
+                    tracing::warn!("TUN read returned 0 bytes — interface may be down");
+                    continue;
+                }
+                if n == -1 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::WouldBlock {
+                        continue;
+                    }
+                    tracing::warn!("TUN read error: {}", err);
+                    continue;
+                }
+                n as usize
             }
+            Ok(Err(e)) => {
+                tracing::warn!("TUN read error: {e}");
+                continue;
+            }
+            Err(_) => continue, // TryIoError (EINTR), retry
+        };
+
+        tracing::debug!("TUN read: {} bytes", n);
+
+        // Drain response channel (TCP and UDP reader tasks send fully-built IP packets)
+        while let Ok((pkt, _, _)) = resp_rx.try_recv() {
+            write_to_tun(&tun, &pkt).await;
         }
 
         let packet = &read_buf[..n];
 
         let hdr = match parse_ip_packet(packet) {
             Some(h) => h,
-            None => continue,
+            None => {
+                let dump = &packet[..n.min(16)];
+                let hex: Vec<String> = dump.iter().map(|b| format!("{:02x}", b)).collect();
+                tracing::debug!("TUN: failed to parse IP packet ({} bytes, first 16 bytes: [{}])", n, hex.join(" "));
+                continue;
+            }
         };
+        tracing::debug!("TUN parsed: v{} proto={} src={}:{} dst={}:{}",
+            hdr.version, hdr.protocol, hdr.src, hdr.src_port, hdr.dst, hdr.dst_port);
+
+        // Skip packets we wrote ourselves (IP identification = 0xBEEF at bytes 4-5)
+        if hdr.version == 4 && packet.len() >= 6 {
+            if packet[4] == 0xBE && packet[5] == 0xEF {
+                continue;
+            }
+        }
 
         let transport_start = hdr.header_len as usize;
         let payload = &packet[transport_start..];
@@ -687,10 +831,11 @@ pub async fn run_tun_tproxy(
         match hdr.protocol {
             6 => handle_tcp_packet(
                 &mut tcp_connections,
-                &tun_fd,
+                &tun,
                 &hdr,
                 payload,
                 &rev_key,
+                &resp_tx,
                 &ctx,
                 &svr_cfg,
             )
@@ -706,7 +851,10 @@ pub async fn run_tun_tproxy(
                 &svr_cfg,
             )
             .await,
-            _ => continue,
+            _ => {
+                tracing::debug!("TUN: ignoring protocol {} from {}:{} (payload {} bytes)",
+                    hdr.protocol, hdr.src, hdr.src_port, payload.len());
+            }
         }
     }
 
@@ -715,32 +863,48 @@ pub async fn run_tun_tproxy(
 
 async fn handle_tcp_packet(
     tcp_connections: &mut HashMap<ConnKey, TcpConn>,
-    tun_fd: &OwnedFd,
+    tun: &AsyncFd<OwnedFd>,
     hdr: &IpHeader,
-    payload: &[u8],
+    data: &[u8], // raw bytes after IP header (TCP header + TCP payload)
     rev_key: &ConnKey,
+    resp_tx: &mpsc::Sender<(Vec<u8>, IpHeader, ConnKey)>,
     ctx: &SharedContext,
     svr_cfg: &ServerConfig,
 ) {
+    // Extract actual TCP payload, skipping header + options.
+    // TCP data offset (offset 12) = (header_len_bytes >> 4) * 4.
+    let mut tcp_header_len = if data.len() >= 13 { ((data[12] >> 4) as usize) * 4 } else { 20 };
+    if tcp_header_len < 20 { tcp_header_len = 20; }
+    let tcp_payload = if data.len() > tcp_header_len { &data[tcp_header_len..] } else { &[] };
+    let is_syn = (hdr.tcp_flags & TCP_SYN) != 0 && (hdr.tcp_flags & TCP_ACK) == 0;
+
     match tcp_connections.get_mut(rev_key) {
         Some(conn) => {
+            tracing::debug!("TCP: existing connection {:?} (tcp_payload {} bytes, flags=0x{:02x})", rev_key, tcp_payload.len(), hdr.tcp_flags);
             conn.last_active = std::time::Instant::now();
 
             // Update client_seq if this packet has data
-            if !payload.is_empty() {
-                conn.client_seq = hdr.tcp_seq + payload.len() as u32;
-                if let Err(e) = conn.write_half.write_all(payload).await {
+            if !tcp_payload.is_empty() {
+                conn.client_seq = hdr.tcp_seq + tcp_payload.len() as u32;
+                if let Err(e) = conn.write_half.write_all(tcp_payload).await {
                     tracing::warn!("TCP stream write failed: {e}, removing connection");
                     tcp_connections.remove(rev_key);
                 }
             }
         }
         None => {
+            // Only handle SYN packets for new connections
+            if !is_syn {
+                tracing::debug!("TCP: ignoring non-SYN for new connection (flags=0x{:02x})", hdr.tcp_flags);
+                return;
+            }
             let target = match (hdr.version, &hdr.dst, hdr.dst_port) {
                 (4, IpAddr::V4(d), p) => Address::SocketAddress(SocketAddr::from((*d, p))),
                 (6, IpAddr::V6(d), p) => Address::SocketAddress(SocketAddr::from((*d, p))),
                 _ => return,
             };
+            tracing::debug!("TCP: new SYN connection from {:?} to {:?} (tcp_payload {} bytes)",
+                rev_key, target, tcp_payload.len());
 
             // Evict oldest if at capacity
             if tcp_connections.len() >= MAX_CONNECTIONS {
@@ -754,47 +918,88 @@ async fn handle_tcp_packet(
                 }
             }
 
-            let payload = payload.to_vec();
+            // Create proxy connection and send SYN-ACK to client (TCP handshake)
             match timeout(
                 Duration::from_secs(10),
-                ProxyClientStream::connect(ctx.clone(), svr_cfg, target.clone()),
+                ProxyClientStream::connect_map(
+                    ctx.clone(),
+                    svr_cfg,
+                    target.clone(),
+                    |raw_stream| {
+                        // Set SO_MARK=0x42 on the raw outbound TCP socket
+                        // so the kernel routes response packets via the local table.
+                        let mark: u32 = 0x42;
+                        let ret = unsafe {
+                            libc::setsockopt(
+                                raw_stream.as_raw_fd(),
+                                libc::SOL_SOCKET,
+                                libc::SO_MARK,
+                                &mark as *const _ as *const libc::c_void,
+                                std::mem::size_of_val(&mark) as libc::socklen_t,
+                            )
+                        };
+                        if ret < 0 {
+                            let err = std::io::Error::last_os_error();
+                            tracing::warn!("Failed to set socket mark on raw stream: {err}");
+                        }
+                        raw_stream
+                    },
+                ),
             )
             .await
             {
-                Ok(Ok(stream)) => {
-                    let (read_half, mut write_half) = split(stream);
-                    tracing::debug!(
-                        "New TCP connection: {}:{} → {}",
-                        hdr.dst,
-                        hdr.dst_port,
-                        svr_cfg.addr(),
-                    );
-
-                    if !payload.is_empty() {
-                        if let Err(e) = write_half.write_all(&payload).await {
+                Ok(Ok(mut stream)) => {
+                    // Shadowsocks ProxyClientStream sends the target address in the FIRST write.
+                    // Write an empty packet to send the connection header (SS handshake).
+                    // Then send any initial data from the client's SYN packet.
+                    tracing::debug!("Sending SS connection header for {:?}", target);
+                    if let Err(e) = stream.write(&[]).await {
+                        tracing::warn!("SS connection header write failed: {e}");
+                        return;
+                    }
+                    if let Err(e) = stream.flush().await {
+                        tracing::warn!("SS connection header flush failed: {e}");
+                        return;
+                    }
+                    if !tcp_payload.is_empty() {
+                        if let Err(e) = stream.write(tcp_payload).await {
                             tracing::warn!("Initial TCP write failed: {e}");
                             return;
                         }
                     }
 
-                    // Spawn per-connection reader: continuously drain SS stream → TUN
-                    let tun_clone = tun_fd.try_clone().ok();
-                    let client_seq = hdr.tcp_seq;
-                    let server_isn = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as u32;
-                    if let Some(tun_fd) = tun_clone {
-                        let key = *rev_key;
-                        tokio::spawn(tcp_reader_task(
-                            read_half,
-                            tun_fd,
-                            *hdr,
-                            key,
-                            client_seq,
-                            server_isn,
-                        ));
+                    let (read_half, write_half) = split(stream);
+
+                    // (connection log above)
+
+                    // Send SYN-ACK to client to complete TCP handshake
+                    let client_isn = hdr.tcp_seq;
+                    let server_isn = fastrand::u32(1..u32::MAX);
+                    if let Ok(synack) = build_synack_packet(hdr, rev_key, server_isn, client_isn) {
+                        write_to_tun(tun, &synack).await;
+                        tracing::debug!("Sent SYN-ACK to client for {:?} (server_isn={server_isn})", rev_key);
+                    } else {
+                        tracing::warn!("Failed to build SYN-ACK for {:?}, removing connection", rev_key);
+                        return;
                     }
+
+                    // Track client sequence: SYN doesn't consume a seq number for data,
+                    // so client_seq starts at client_isn + 1
+                    let client_seq = client_isn + 1;
+
+                    // Spawn per-connection reader: continuously drain SS stream → channel
+                    let server_seq = server_isn;
+                    let resp_tx_clone = resp_tx.clone();
+                    let orig_hdr = *hdr;
+                    let conn_key = *rev_key;
+                    tokio::spawn(tcp_reader_task(
+                        read_half,
+                        resp_tx_clone,
+                        orig_hdr,
+                        conn_key,
+                        client_seq,
+                        server_seq,
+                    ));
 
                     tcp_connections.insert(
                         *rev_key,
@@ -804,6 +1009,7 @@ async fn handle_tcp_packet(
                             client_seq,
                         },
                     );
+                    tracing::info!("TCP connection established: {:?} → {}", rev_key, target);
                 }
                 Ok(Err(e)) => {
                     tracing::warn!("Failed to create TCP connection to {}: {e}", target);
@@ -816,21 +1022,20 @@ async fn handle_tcp_packet(
     }
 }
 
-/// Per-connection reader: continuously read from SS stream and write to TUN.
+/// Per-connection reader: continuously read from SS stream and send responses.
 /// Runs until the stream closes or errors.
 async fn tcp_reader_task(
     mut stream: tokio::io::ReadHalf<ProxyClientStream<SsTcpStream>>,
-    tun_fd: OwnedFd,
-    orig_hdr: IpHeader, // Original client packet for src/dst
+    resp_tx: mpsc::Sender<(Vec<u8>, IpHeader, ConnKey)>,
+    orig_hdr: IpHeader,
     rev_key: ConnKey,
-    client_seq: u32,    // Client's current seq (for ACK in response)
-    mut server_seq: u32, // Server's current seq (incremented per response)
+    client_seq: u32,
+    mut server_seq: u32,
 ) {
     let mut resp_buf = [0u8; 65536];
     loop {
         match stream.read(&mut resp_buf).await {
             Ok(0) => {
-                // Stream closed (EOF)
                 tracing::debug!("TCP stream EOF for {:?}, removing connection", rev_key);
                 return;
             }
@@ -849,10 +1054,18 @@ async fn tcp_reader_task(
                         return;
                     }
                 };
-                write_to_tun(&tun_fd, &pkt).await;
+                if resp_tx.send((pkt, orig_hdr, rev_key)).await.is_err() {
+                    return;
+                }
                 server_seq += n as u32;
             }
             Err(e) => {
+                let kind = e.kind();
+                if kind == std::io::ErrorKind::WouldBlock {
+                    // Non-blocking socket: retry after a short sleep
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    continue;
+                }
                 tracing::warn!("TCP stream read error for {:?}: {e}", rev_key);
                 return;
             }
@@ -871,13 +1084,8 @@ async fn handle_udp_packet(
     server_udp_addr: SocketAddr,
     svr_cfg: &ServerConfig,
 ) {
-    // Track this UDP flow
-    {
-        let mut map = udp_connections.lock().unwrap();
-        map.insert(*rev_key, UdpConnMeta {
-            hdr: *hdr,
-            rev_key: *rev_key,
-        });
+    if payload.is_empty() {
+        return;
     }
 
     let target = match (hdr.version, &hdr.dst, hdr.dst_port) {
@@ -885,9 +1093,15 @@ async fn handle_udp_packet(
         (6, IpAddr::V6(d), p) => Address::SocketAddress(SocketAddr::from((*d, p))),
         _ => return,
     };
+    tracing::debug!("UDP: new packet from {}:{} to {:?}", hdr.src, hdr.src_port, target);
 
-    if payload.is_empty() {
-        return;
+    // Track this UDP flow
+    {
+        let mut map = udp_connections.lock().unwrap();
+        map.insert(*rev_key, UdpConnMeta {
+            hdr: *hdr,
+            rev_key: *rev_key,
+        });
     }
 
     let us = udp_socket.clone();
@@ -963,7 +1177,7 @@ async fn udp_response_reader(
 
                 if let Some(meta) = conn_info {
                     if let Ok(pkt) = build_response_packet(&buf[.._payload_len], &meta.hdr, &meta.rev_key) {
-                        write_to_tun(&tun_fd, &pkt).await;
+                        write_to_tun_raw(&tun_fd, &pkt).await;
                     }
                 }
             }
@@ -1251,9 +1465,9 @@ mod tests {
 
         let pkt = build_response_packet(&payload, &original, &rev).expect("build response");
 
-        // Response src = original dst = 1.2.3.4 (swapped)
+        // Response src = original dst = 1.2.3.4 (swapped) — IPv4 header: src at offset 12
         assert_eq!(pkt[12..16], [1, 2, 3, 4]);
-        // Response dst = original src = 10.0.0.1 (swapped)
+        // Response dst = original src = 10.0.0.1 (swapped) — IPv4 header: dst at offset 16
         assert_eq!(pkt[16..20], [10, 0, 0, 1]);
         // Ports swapped: src=5678 (0x162e), dst=1234 (0x04d2)
         assert_eq!(&pkt[20..24], &[0x16, 0x2e, 0x04, 0xd2]);

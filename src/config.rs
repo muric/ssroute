@@ -6,6 +6,8 @@ use anyhow::{bail, Context, Result};
 
 const DEFAULT_CONCURRENCY: usize = 4;
 const DEFAULT_MTU: u16 = 1500;
+const DEFAULT_ROUTE_DIR: &str = "/etc/ssroute/data";
+const DEFAULT_DEFAULT_ROUTE_DIR: &str = "/etc/ssroute/default_route";
 
 /// Parse a boolean string value.
 /// Accepts: true/false, yes/no, 1/0 (case-insensitive).
@@ -34,7 +36,9 @@ pub struct Config {
     pub default_gateway: String,
     pub default_interface: String,
     pub concurrency: usize,
-    pub mtu: u16, // 0 = auto
+    pub mtu: u16,            // 0 = auto
+    pub route_dir: String,     // directory for TUN route JSON files
+    pub default_route_dir: String, // directory for default route JSON files
 
     // Shadowsocks
     pub ss_enabled: bool,
@@ -62,6 +66,8 @@ impl Default for Config {
             default_interface: String::new(),
             concurrency: DEFAULT_CONCURRENCY,
             mtu: 0,
+            route_dir: DEFAULT_ROUTE_DIR.to_string(),
+            default_route_dir: DEFAULT_DEFAULT_ROUTE_DIR.to_string(),
 
             ss_enabled: false,
             ss_server: String::new(),
@@ -141,6 +147,8 @@ pub fn read_config(path: &Path) -> Result<Config> {
             "obfs_host" => config.obfs_host = value.to_string(),
             "ss_plugin" => config.ss_plugin = value.to_string(),
             "ss_plugin_opts" => config.ss_plugin_opts = value.to_string(),
+            "route_dir" => config.route_dir = value.to_string(),
+            "default_route_dir" => config.default_route_dir = value.to_string(),
             _ => {} // unknown keys silently ignored
         }
     }
